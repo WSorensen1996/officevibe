@@ -109,6 +109,16 @@ function getTranscriber() {
   return transcriberPromise;
 }
 
+/** Drop the (failed/dead) WebGPU pipeline and switch to the known-good q8 CPU model on
+ *  WASM. Shared by the init-time fallback and the runtime (mid-transcribe) fallback —
+ *  WebGPU is flaky on some drivers and must never break dictation. The dtype branch in
+ *  getTranscriber() keys off `device`, so flipping it to 'wasm' selects q8 automatically. */
+function fallbackToCpu(): void {
+  device = 'wasm';
+  modelId = CPU_FALLBACK_MODEL;
+  transcriberPromise = null;
+}
+
 ctx.onmessage = async (e: MessageEvent) => {
   const msg = e.data as
     | { type: 'init'; base: string; model?: string; device?: 'webgpu' | 'wasm' }
@@ -127,17 +137,34 @@ ctx.onmessage = async (e: MessageEvent) => {
         if (device !== 'webgpu') throw initErr;
         log('error', `webgpu init failed; falling back to ${CPU_FALLBACK_MODEL} on CPU:`,
           initErr instanceof Error ? (initErr.stack ?? initErr.message) : String(initErr));
-        device = 'wasm';
-        modelId = CPU_FALLBACK_MODEL;
-        transcriberPromise = null;
+        fallbackToCpu();
         await getTranscriber();
       }
       log('log', `model ready on ${device}`);
       ctx.postMessage({ type: 'ready', device });
     } else if (msg.type === 'transcribe') {
       log('log', `transcribe start: ${msg.pcm.length} samples (~${(msg.pcm.length / 16000).toFixed(1)}s)`);
-      const transcriber = await getTranscriber();
-      const out = (await transcriber(msg.pcm)) as { text?: string } | Array<{ text?: string }>;
+      let out: { text?: string } | Array<{ text?: string }>;
+      try {
+        const transcriber = await getTranscriber();
+        out = (await transcriber(msg.pcm)) as { text?: string } | Array<{ text?: string }>;
+      } catch (txErr) {
+        // A WebGPU failure DURING transcription (e.g. the shared GPU process is recycled
+        // after a swapchain hang) must never lose the user's audio. Drop the dead GPU
+        // pipeline, rebuild on the q8 CPU model, and re-run the SAME pcm — the worker
+        // still owns it (transformers.js reads it, doesn't detach it), and a fresh WASM
+        // pipeline doesn't touch the GPU process so it succeeds even right after the
+        // crash. Tell the hook the backend moved to CPU so Settings + its device cache
+        // stay truthful and it won't keep retrying WebGPU this session. CPU-path failures
+        // are real → rethrow to the outer catch. Mirrors the init-time fallback above.
+        if (device !== 'webgpu') throw txErr;
+        log('error', `webgpu transcribe failed; falling back to ${CPU_FALLBACK_MODEL} on CPU and retrying:`,
+          txErr instanceof Error ? (txErr.stack ?? txErr.message) : String(txErr));
+        fallbackToCpu();
+        ctx.postMessage({ type: 'backend-changed', device });
+        const cpu = await getTranscriber();
+        out = (await cpu(msg.pcm)) as { text?: string } | Array<{ text?: string }>;
+      }
       log('log', 'transcribe raw output', out);
       const text = Array.isArray(out)
         ? out.map((o) => o.text ?? '').join(' ')

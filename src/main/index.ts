@@ -39,7 +39,22 @@ protocol.registerSchemesAsPrivileged([
 // Must run BEFORE app ready (module load is). enable-unsafe-webgpu turns the API on
 // where Chromium gates it; Vulkan is the WebGPU backend on Linux. REMOVE if no-go.
 app.commandLine.appendSwitch('enable-unsafe-webgpu');
-if (process.platform === 'linux') app.commandLine.appendSwitch('enable-features', 'Vulkan');
+if (process.platform === 'linux') {
+  // VulkanFromANGLE + DefaultANGLEVulkan route WebGPU through ANGLE's Vulkan backend.
+  // With plain 'Vulkan' alone, a transcription on the GPU tier hangs the display
+  // compositor's Vulkan swapchain (vkAcquireNextImageKHR hangs → GPU process recycled)
+  // on this AMD/RADV stack — the documented workaround for that exact symptom + flag
+  // combo (gpuweb/gpuweb#5022). Keep all three together.
+  app.commandLine.appendSwitch('enable-features', 'Vulkan,VulkanFromANGLE,DefaultANGLEVulkan');
+  // The office floor's continuous WebGL render loop shares one GPU process with the STT
+  // WebGPU compute. A heavy transcription can briefly stall the compositor's swapchain
+  // present (vkAcquireNextImageKHR hangs); Chromium's GPU watchdog treats that as an
+  // unrecoverable hang and recycles the whole GPU process, killing the in-flight
+  // transcription AND the scene. We already pause the render loop during transcription
+  // (see useDictation + OfficeFloor); disabling the watchdog keeps a brief stall from
+  // escalating to a process kill. Linux/Vulkan only, where the contention occurs.
+  app.commandLine.appendSwitch('disable-gpu-watchdog');
+}
 
 /** Content-Type for a file served over the app:// protocol. */
 function mimeForPath(p: string): string {

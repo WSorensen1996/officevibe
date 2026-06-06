@@ -202,6 +202,10 @@ interface State {
   godStatus: GodStatus;
   /** The compute backend the STT worker reported on its last model load (5z52). */
   sttBackend: SttBackend | null;
+  /** True while a dictation is decoding (model ensure + transcribe). OfficeFloor pauses
+   *  its Pixi render loop while set, so the office floor's WebGL rendering doesn't contend
+   *  with the STT WebGPU/WASM compute for the shared GPU process. Transient (not persisted). */
+  sttBusy: boolean;
   /** Per-agent outgoing message queue (agent id → messages awaiting delivery).
    *  Lets the user keep "talking" to a busy agent: messages park here and are
    *  drained to the terminal one-by-one once the agent is free. */
@@ -218,6 +222,7 @@ interface State {
   bumpToolCount: (id: string) => void;
   setGodStatus: (status: GodStatus) => void;
   setSttBackend: (b: SttBackend | null) => void;
+  setSttBusy: (busy: boolean) => void;
   select: (id: string) => void;
   updateAgent: (id: string, patch: Partial<Agent>) => void;
   pushFeed: (id: string, line: string) => void;
@@ -420,6 +425,7 @@ export const useStore = create<State>((set) => ({
   browserPinnedAgentId: null,
   godStatus: 'booting',
   sttBackend: null,
+  sttBusy: false,
   messageQueues: initialQueues,
   floorStarted: false,
   startFloor: () => set({ floorStarted: true }),
@@ -428,6 +434,7 @@ export const useStore = create<State>((set) => ({
     set((s) => ({ toolCounts: { ...s.toolCounts, [id]: (s.toolCounts[id] ?? 0) + 1 } })),
   setGodStatus: (status) => set({ godStatus: status }),
   setSttBackend: (b) => set({ sttBackend: b }),
+  setSttBusy: (busy) => set({ sttBusy: busy }),
   select: (id) => set((s) => { persistAgents(s.agents, id); return { selectedId: id }; }),
   updateAgent: (id, patch) =>
     set((s) => ({ agents: s.agents.map(a => a.id === id ? { ...a, ...patch } : a) })),

@@ -561,8 +561,20 @@ export function OfficeFloor() {
       syncAgents();
 
       let lastSelected: string | null = useStore.getState().selectedId;
+      let lastBusy = useStore.getState().sttBusy;
       const unsubscribe = useStore.subscribe((s, prev) => {
         if (s.agents !== prev.agents) syncAgents();
+        if (s.sttBusy !== lastBusy) {
+          // A dictation is decoding → pause the render loop so the floor's continuous
+          // WebGL rendering doesn't contend with the speech model's GPU compute for the
+          // shared GPU process (the contention that hangs the compositor's Vulkan
+          // swapchain and crashes the GPU on the WebGPU tier). Resume when it's done.
+          lastBusy = s.sttBusy;
+          try {
+            if (s.sttBusy) app.ticker.stop();
+            else app.ticker.start();
+          } catch { /* app may be tearing down */ }
+        }
         if (s.selectedId !== lastSelected) {
           // Move the selection halo: clear the previously-selected character
           // (it may have just been removed — a safe no-op then), light the new
@@ -663,6 +675,10 @@ export function OfficeFloor() {
         }
       };
       app.ticker.add(onTick);
+      // If a dictation is already decoding at mount (e.g. the office tab was hidden and
+      // just revealed mid-transcription), honor the paused state now — the subscriber
+      // above only fires on subsequent changes.
+      if (useStore.getState().sttBusy) { try { app.ticker.stop(); } catch { /* noop */ } }
 
       const resize = new ResizeObserver((entries) => {
         for (const e of entries) {

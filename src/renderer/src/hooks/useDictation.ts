@@ -20,6 +20,10 @@ let nextId = 0;
 // config change (model switch) or a device change.
 let loadedModel: string | null = null;
 let loadedDevice: 'webgpu' | 'wasm' | null = null;
+// Once a WebGPU transcription has crashed and fallen back to CPU this session, stop
+// choosing the WebGPU backend — retrying it would just re-crash the shared GPU process.
+// Set when the worker posts 'backend-changed'; cleared only by an app restart.
+let webgpuDisabledThisSession = false;
 const pending = new Map<number, { resolve: (t: string) => void; reject: (e: Error) => void }>();
 
 // Models that should run on the WebGPU backend when an adapter is present. The CPU
@@ -50,8 +54,8 @@ async function ensureWorker(): Promise<void> {
   const gpuPresent = typeof navigator !== 'undefined' && !!navigator.gpu;
   let desiredDevice: 'webgpu' | 'wasm' = 'wasm';
   if (GPU_MODELS.has(desiredModel)) {
-    if (gpuPresent) desiredDevice = 'webgpu';
-    else desiredModel = 'whisper-base.en'; // no GPU → run the Standard CPU model
+    if (gpuPresent && !webgpuDisabledThisSession) desiredDevice = 'webgpu';
+    else desiredModel = 'whisper-base.en'; // no (usable) GPU → run the Standard CPU model
   }
 
   // A worker already exists but for a different model OR backend → tear it down so it
@@ -90,6 +94,18 @@ async function ensureWorker(): Promise<void> {
       else if (m.type === 'error') { sttLog('error', 'worker init error:', m.message); reject(new Error(m.message || 'failed to load speech model')); }
       else if (m.type === 'result') { pending.get(m.id)?.resolve(m.text); pending.delete(m.id); }
       else if (m.type === 'result-error') { pending.get(m.id)?.reject(new Error(m.message)); pending.delete(m.id); }
+      else if (m.type === 'backend-changed') {
+        // The worker hit a WebGPU failure mid-transcribe and fell back to the CPU model.
+        // Keep the singleton's device/model cache in sync so ensureWorker() doesn't think
+        // it's still on WebGPU, latch WebGPU off for the session (don't re-crash the GPU),
+        // and update the Settings backend readout. The in-flight transcribe still resolves
+        // normally with the CPU result.
+        sttLog('log', 'worker fell back to', m.device, '— disabling webgpu for this session');
+        webgpuDisabledThisSession = true;
+        loadedDevice = m.device ?? 'wasm';
+        loadedModel = 'whisper-base.en';
+        try { useStore.getState().setSttBackend({ device: m.device ?? 'wasm' }); } catch { /* noop */ }
+      }
       // Relay worker [stt][worker] logs to the main process (terminal).
       else if (m.type === 'log') { try { window.cth?.sttLog?.(m.level, ['[worker]', ...(m.parts ?? [])]); } catch { /* noop */ } }
     };
@@ -154,12 +170,24 @@ export function useDictation(onTranscript: (text: string) => void): UseDictation
     try {
       const pcm = await rec.stop();
       sttLog('log', `stop: got ${pcm.length} samples; ensuring model…`);
-      await ensureWorker();
-      sttLog('log', 'stop: transcribing…');
-      const text = await transcribe(pcm);
-      sttLog('log', 'stop: transcript=', JSON.stringify(text));
-      if (text) onTranscriptRef.current(text);
-      setState('idle');
+      // Pause the office floor's Pixi render loop for the GPU-heavy window (model ensure +
+      // transcribe). On the WebGPU tier this is what stops the continuous WebGL rendering
+      // from contending with ONNX compute for the single shared GPU process — the
+      // contention that hangs the compositor's Vulkan swapchain and crashes the GPU
+      // mid-transcription. zustand fires subscribers synchronously, so OfficeFloor stops
+      // its ticker before the transcribe below runs. Always cleared in finally (success,
+      // error, AND the worker's CPU-fallback retry).
+      useStore.getState().setSttBusy(true);
+      try {
+        await ensureWorker();
+        sttLog('log', 'stop: transcribing…');
+        const text = await transcribe(pcm);
+        sttLog('log', 'stop: transcript=', JSON.stringify(text));
+        if (text) onTranscriptRef.current(text);
+        setState('idle');
+      } finally {
+        useStore.getState().setSttBusy(false);
+      }
     } catch (e) {
       sttLog('error', 'stop/transcribe failed:', e);
       setState('error');
