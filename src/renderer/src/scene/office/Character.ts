@@ -126,8 +126,6 @@ export class Character {
     this.overlay.eventMode = 'none';
   }
 
-  getAnimation(): CharacterAnimation { return this.state; }
-  getDeskTile(): { x: number; y: number } { return this.deskTile; }
   getPixelPosition(): { x: number; y: number } { return { x: this.px, y: this.py }; }
 
   getTilePosition(): { x: number; y: number } {
@@ -290,14 +288,6 @@ export class Character {
     this.wandering = false;
     this.arrivalCallback = null;
     this.moveTo(tile);
-  }
-
-  repositionTo(tx: number, ty: number): void {
-    this.deskTile = { x: tx, y: ty };
-    const pos = this.mapRenderer.tileToPixel(tx, ty);
-    this.px = pos.x + this.mapRenderer.tileSize / 2;
-    this.py = pos.y + this.mapRenderer.tileSize;
-    this.sprite.setPosition(this.px, this.py);
   }
 
   /** Show what the agent is doing right now in the thought cloud above its head.

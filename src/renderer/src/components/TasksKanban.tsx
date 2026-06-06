@@ -8,7 +8,6 @@ import { useStore, NEW_TASK_ID } from '@/store/store';
 import { useTasks } from '@/hooks/useTasks';
 import {
   type ProjectTask,
-  type TaskUpdate,
   type TaskAttachment,
   type Status,
   type ScheduledMission,

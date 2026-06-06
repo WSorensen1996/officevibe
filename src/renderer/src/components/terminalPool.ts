@@ -49,8 +49,8 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
   const term = new Terminal({
     // Match the pty's spawn geometry (PtyManager spawns at 100×30). Before a view
     // first attaches and fits this terminal, the default 80×24 would wrap content
-    // differently than the pty formats it — which corrupts headless buffer reads
-    // (capturePrompt.readPtyTail) for background agents that were never opened.
+    // differently than the pty formats it — which corrupts the buffer for
+    // background agents whose tab was never opened.
     cols: 100,
     rows: 30,
     theme,

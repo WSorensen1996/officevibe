@@ -6,7 +6,7 @@ import { join, resolve, sep, extname } from 'node:path';
 import { PtyManager, type SpawnOptions } from './pty';
 import {
   readConfig, writeConfig, resetConfig, ensureHarnessHome,
-  slugify, projectFolderName, defaultProjectsDir, deriveProjectName, upsertProject,
+  projectFolderName, defaultProjectsDir, deriveProjectName, upsertProject,
   type HarnessConfig, type ScheduledMission, type ProjectRef
 } from './config';
 import { listDir, readFileText, writeFileText, writeFileBinary, readFileBinary } from './fs';
@@ -889,7 +889,6 @@ ipcMain.handle('attachment:read', (_evt, rel: unknown) => {
 });
 
 // ─── IPC: project store (multi-agent coordination) ──────────────────────────
-ipcMain.handle('project:registry', () => hive.registry());
 ipcMain.handle('project:board', () => hive.board());
 ipcMain.handle('project:tasks', () => hive.tasks());
 ipcMain.handle('project:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
@@ -908,20 +907,8 @@ ipcMain.handle('project:writeTasks', (_evt, tasks: unknown) => {
   hive.writeTasks(tasks as ProjectTask[]);
   return { ok: true };
 });
-ipcMain.handle('project:setArchived', (_evt, id: unknown, archived: unknown) => {
-  if (typeof id !== 'string') return { ok: false, error: 'invalid id' };
-  if (!hive.enabled()) return { ok: false, error: 'no active project' };
-  hive.setArchived(id, archived === true);
-  return { ok: true };
-});
 
 // ─── IPC: project management (open / create / switch) ───────────────────────
-/** List known projects + which one is active (drives the switcher). */
-ipcMain.handle('project:list', () => {
-  const cfg = readConfig();
-  return { projects: cfg.projects ?? [], activeProjectPath: cfg.activeProjectPath ?? null };
-});
-
 /** Tear down all services bound to the current project, then relaunch the app so
  *  the boot sequence re-bootstraps everything against the newly-active project.
  *  Mirrors the reset flow minus the data wipe. The process exits → never returns. */
@@ -1149,12 +1136,11 @@ ipcMain.handle('slack:start', () => startSlackServer());
 ipcMain.handle('slack:stop', () => { stopSlackServer(); return { ok: true }; });
 ipcMain.handle('slack:setConfig', (_evt, patch: unknown) => {
   const p = (patch ?? {}) as {
-    signingSecret?: unknown; botToken?: unknown; channelId?: unknown; port?: unknown; enabled?: unknown;
+    signingSecret?: unknown; channelId?: unknown; port?: unknown; enabled?: unknown;
   };
   const next: Partial<HarnessConfig> = {};
   // Trim string fields; an emptied field clears back to undefined.
   if (typeof p.signingSecret === 'string') next.slackSigningSecret = p.signingSecret.trim() || undefined;
-  if (typeof p.botToken === 'string') next.slackBotToken = p.botToken.trim() || undefined;
   if (typeof p.channelId === 'string') next.slackChannelId = p.channelId.trim() || undefined;
   if (typeof p.port === 'number' && Number.isFinite(p.port)) next.slackPort = p.port;
   if (typeof p.enabled === 'boolean') next.slackEnabled = p.enabled;

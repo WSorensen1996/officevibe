@@ -45,8 +45,6 @@ export interface Agent {
   /** persistent short context — what is this agent for (shown on the floor) */
   description: string;
   project: string;
-  /** legacy field — populated only for the seeded mock agents */
-  tmuxTarget: string;
   cwd: string;
   goal?: string;
   status: StatusKind;
@@ -90,12 +88,6 @@ export interface Agent {
    *  (in the store's `archivedAgents` list + the hive registry) but flagged and
    *  kept off the floor; only live-PTY agents are 'active'. */
   archived?: boolean;
-}
-
-export interface FeedEntry {
-  agentId: string;
-  text: string;
-  ts: number;
 }
 
 /** A message the user has parked for an agent while its terminal was busy.

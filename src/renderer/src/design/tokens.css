@@ -33,15 +33,8 @@
   --cth-status-ghost:    #D9CFE0;
 
   /* Spacing */
-  --cth-space-0: 0px;
-  --cth-space-1: 4px;
   --cth-space-2: 8px;
   --cth-space-3: 12px;
-  --cth-space-4: 16px;
-  --cth-space-5: 24px;
-  --cth-space-6: 32px;
-  --cth-space-7: 48px;
-  --cth-space-8: 64px;
 
   /* Type */
   --cth-font-display: "Press Start 2P", monospace;
@@ -49,23 +42,16 @@
   --cth-font-mono:    "VT323", "JetBrains Mono", monospace;
 
   /* Type scale */
-  --cth-text-display-lg: 16px;
   --cth-text-display-md: 12px;
   --cth-text-display-sm: 8px;
   --cth-text-body-lg:    18px;
   --cth-text-body-md:    16px;
   --cth-text-body-sm:    14px;
-  --cth-text-mono-md:    16px;
-  --cth-text-mono-sm:    14px;
 
   /* Line heights — integer multiples */
-  --cth-lh-display-lg: 24px;
   --cth-lh-display-md: 20px;
   --cth-lh-display-sm: 12px;
-  --cth-lh-body-lg:    24px;
   --cth-lh-body-md:    20px;
-  --cth-lh-body-sm:    18px;
-  --cth-lh-mono:       20px;
 
   /* Hard drop shadow — no blur */
   --cth-shadow-hard: 4px 4px 0 rgba(26, 19, 32, 0.25);

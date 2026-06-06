@@ -35,13 +35,6 @@ export interface AgentSay {
   turn: string;
 }
 
-export interface ProjectRegistry {
-  godId: string | null;
-  /** `archived` agents have had their terminal closed — retained + flagged, not
-   *  deleted; only live-PTY agents are 'active'. */
-  agents: Record<string, AgentMeta & { status: string; lastSeen: number; archived?: boolean }>;
-}
-
 /** A short agent-posted status note shown on a task card (mirrors main's TaskUpdate). */
 export interface TaskUpdate {
   ts: string;
@@ -281,8 +274,6 @@ export interface BrowserViews {
 export interface BrowserBounds { x: number; y: number; width: number; height: number }
 
 const api = {
-  version: '0.1.0',
-
   // ─── PTY ─────────────────────────────────────────────────────────────────
   spawnPty: (opts: SpawnPtyOptions): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('pty:spawn', opts),
@@ -334,9 +325,6 @@ const api = {
     ipcRenderer.invoke('config:ensureHome', path),
 
   // ─── Project management (open / create / switch) ──────────────────────────
-  /** Known projects + which one is active. */
-  projectList: (): Promise<{ projects: ProjectRef[]; activeProjectPath: string | null }> =>
-    ipcRenderer.invoke('project:list'),
   /** Create `officevibe-<slug>` under parentDir, make it active, relaunch. The
    *  process exits on success, so this promise typically never resolves. */
   projectCreate: (name: string, parentDir?: string): Promise<{ ok: boolean; path?: string; error?: string }> =>
@@ -371,7 +359,6 @@ const api = {
   > => ipcRenderer.invoke('attachment:read', rel),
 
   // ─── Project store (multi-agent coordination) ────────────────────────────
-  projectRegistry: (): Promise<ProjectRegistry> => ipcRenderer.invoke('project:registry'),
   projectBoard: (): Promise<string> => ipcRenderer.invoke('project:board'),
   projectTasks: (): Promise<unknown> => ipcRenderer.invoke('project:tasks'),
   projectLog: (n?: number): Promise<unknown[]> => ipcRenderer.invoke('project:log', n ?? 200),
@@ -506,12 +493,6 @@ const api = {
   setNotifications: (v: boolean): Promise<HarnessConfig> =>
     ipcRenderer.invoke('app:setNotifications', v),
 
-  // ─── Agent lifecycle (archival) ─────────────────────────────────────────────
-  /** Archive/unarchive a hive agent in the registry. Closing a terminal tab
-   *  archives it automatically via pty:kill; this is the explicit primitive. */
-  projectSetArchived: (id: string, archived: boolean): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('project:setArchived', id, archived),
-
   // ─── Slack integration (Slack message → Michael's queue) ─────────────────────
   /** Register a listener for inbound Slack messages; returns an unsubscribe fn.
    *  Same pattern as onProjectHookEvent. */
@@ -529,7 +510,7 @@ const api = {
     ipcRenderer.invoke('slack:stop'),
   /** Persist Slack settings (and stop the server if disabled / secret cleared). */
   slackSetConfig: (patch: {
-    signingSecret?: string; botToken?: string; channelId?: string; port?: number; enabled?: boolean;
+    signingSecret?: string; channelId?: string; port?: number; enabled?: boolean;
   }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('slack:setConfig', patch),
 

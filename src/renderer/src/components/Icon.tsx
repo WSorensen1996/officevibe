@@ -4,7 +4,7 @@
 import { CSSProperties } from 'react';
 
 export type IconName =
-  | 'gear' | 'plus' | 'x' | 'check' | 'arrow-right' | 'pause' | 'play'
+  | 'gear' | 'plus' | 'x' | 'check' | 'arrow-right' | 'pause'
   | 'bell' | 'folder' | 'terminal' | 'code' | 'web' | 'mcp' | 'sparkle'
   | 'expand' | 'minimize' | 'mic' | 'book';
 
@@ -40,10 +40,6 @@ const paths: Record<IconName, IconDef> = {
   pause: {
     accentColor: 'var(--cth-lemon)',
     ink:   'M4 3h3v10H4V3zm5 0h3v10H9V3z'
-  },
-  play: {
-    accentColor: 'var(--cth-mint)',
-    ink:   'M4 3h2v2h2v2h2v2H8v2H6v2H4V3z'
   },
   bell: {
     accentColor: 'var(--cth-peach)',

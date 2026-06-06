@@ -2,7 +2,7 @@ import { Container } from 'pixi.js';
 
 // Simplified port of shahar061/the-office (office/engine/camera.ts).
 // Phase targeting is dropped (we have no project phases); kept: fit-to-screen,
-// map-edge clamping, smooth lerp, a manual focus(), and nudgeToward() used to
+// map-edge clamping, smooth lerp, and nudgeToward() used to
 // pan toward the selected agent.
 
 const LERP_SPEED = 0.08;
@@ -53,14 +53,6 @@ export class Camera {
     this.targetX = this.mapWidth / 2;
     this.targetY = this.mapHeight / 2;
     this.targetZoom = this.getMinZoom();
-  }
-
-  /** Pan/zoom toward a world point (used when an agent is selected). */
-  focusOn(worldX: number, worldY: number, zoom?: number): void {
-    this.manualOverride = true;
-    this.targetX = worldX;
-    this.targetY = worldY;
-    this.targetZoom = Math.max(this.getMinZoom(), Math.min(4, zoom ?? this.currentZoom));
   }
 
   /** A gentle, decaying pan toward a world point without taking manual control. */

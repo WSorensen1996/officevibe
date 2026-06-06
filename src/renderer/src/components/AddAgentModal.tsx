@@ -131,7 +131,6 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
         accent,
         description: description.trim() || 'a fresh harness',
         project: basename(cwd),
-        tmuxTarget: '',
         cwd,
         goal: goal.trim() || undefined,
         status: 'idle',

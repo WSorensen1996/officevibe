@@ -73,7 +73,7 @@ function NeedsYouCard({ agent }: { agent: Agent }) {
     markAnswered(agent.id, reason);
     updateAgent(agent.id, { status: 'working', blockReason: undefined });
   };
-  const onAction = (action: { send?: string; decision?: 'allow' | 'deny' }) => {
+  const onAction = (action: { decision?: 'allow' | 'deny' }) => {
     // Hook-backed permission card: resolve the PreToolUse gate with a structured
     // verdict (deny carries the typed reply as the reason fed back to the model).
     if (reason.requestId && action.decision) {
@@ -81,12 +81,7 @@ function NeedsYouCard({ agent }: { agent: Agent }) {
       void window.cth.respondPermission(reason.requestId, action.decision, note);
       setReply('');
       clear();
-      return;
     }
-    // Legacy terminal-scrape card: type the exact keystroke into the agent's pty.
-    if (!action.send) return;
-    window.cth.writePty(ptyId, action.send);
-    clear();
   };
   const sendReply = async () => {
     const t = reply.trim();

@@ -3,7 +3,7 @@ import { AnimatedSprite, Container, Graphics, Texture } from 'pixi.js';
 export type Direction = 'down' | 'up' | 'right' | 'left';
 export type AnimState = 'walk' | 'type' | 'read' | 'idle';
 
-// Output rows from SpriteAdapter: down=0, up=1, right=2 (left = flipped right)
+// Sprite-sheet row order: down=0, up=1, right=2 (left = flipped right)
 const DIRECTION_ROW: Record<Direction, number> = {
   down: 0,
   up: 1,

@@ -612,16 +612,8 @@ export function OfficeFloor() {
             for (const target of e.targets) spawnHandoff(e.from, target, e.act, e.needsHuman);
           })
         : () => { /* onProjectMessage unavailable — real handoffs disabled this session */ };
-      // Demo path: with no live hive, the mock loop dispatches synthetic handoffs
-      // so the animation is still visible. Clearly demo-only, fed by mockEvents.ts.
-      const onDemoHandoff = (ev: Event) => {
-        const d = (ev as CustomEvent<{ from: string; to: string; act: MessageAct }>).detail;
-        if (d) spawnHandoff(d.from, d.to, d.act, false);
-      };
-      window.addEventListener('cth:demo-handoff', onDemoHandoff);
       (app as any).__offMessage = () => {
         offMessage();
-        window.removeEventListener('cth:demo-handoff', onDemoHandoff);
       };
 
       // Keep two nearby thought clouds from covering each other: stack the

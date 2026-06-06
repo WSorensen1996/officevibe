@@ -154,10 +154,6 @@ export class ThoughtBubble {
     this.container.visible = false;
   }
 
-  isHidden(): boolean {
-    return this.state === 'hidden';
-  }
-
   update(dt: number): void {
     if (this.isThinking && (this.state === 'visible' || this.state === 'fading-in')) {
       this.dotsElapsed += dt;

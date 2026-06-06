@@ -92,8 +92,6 @@ export interface HarnessConfig {
   slackEnabled?: boolean;
   /** Slack app signing secret (Basic Information → Signing Secret). Never logged. */
   slackSigningSecret?: string;
-  /** Bot token (xoxb-…) — only needed if the bot ever replies; optional for now. */
-  slackBotToken?: string;
   /** Restrict ingestion to one channel id; empty/undefined = any channel. */
   slackChannelId?: string;
   /** Local HTTP port the webhook server binds to (default 3847). */
@@ -126,7 +124,6 @@ const DEFAULTS: HarnessConfig = {
   notifications: false,
   slackEnabled: false,
   slackSigningSecret: undefined,
-  slackBotToken: undefined,
   slackChannelId: undefined,
   slackPort: undefined,
   mcpServers: []
@@ -199,14 +196,6 @@ export function resetConfig(): HarnessConfig {
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, JSON.stringify(DEFAULTS, null, 2), 'utf8');
   return { ...DEFAULTS };
-}
-
-/** Auto-suggested command string given current autoMode preference. */
-export function commandForAutoMode(config: HarnessConfig): string {
-  if (config.autoMode) {
-    return `${config.defaultCommand} --permission-mode bypassPermissions`;
-  }
-  return config.defaultCommand;
 }
 
 /** Ensure a folder exists on disk (used for harnessHome + project folders). */

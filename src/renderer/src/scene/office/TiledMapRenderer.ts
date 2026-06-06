@@ -97,9 +97,7 @@ export class TiledMapRenderer {
   }
 
   getSpawnPoint(name: string): Point | undefined { return this.spawnPoints.get(name); }
-  getAllSpawnPoints(): Map<string, Point> { return this.spawnPoints; }
   getZone(name: string): ZoneRect | undefined { return this.zones.get(name); }
-  getAllZones(): Map<string, ZoneRect> { return this.zones; }
 
   private parseCollisionLayer(): void {
     const layer = this.findLayer(COLLISION_LAYER, 'tilelayer');
