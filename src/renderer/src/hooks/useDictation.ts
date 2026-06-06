@@ -42,11 +42,17 @@ async function ensureWorker(): Promise<void> {
     if (cfg?.sttModel) desiredModel = cfg.sttModel;
   } catch { /* fall back to default */ }
 
-  // Run the GPU tier on WebGPU only when an adapter is reachable; otherwise (CPU model,
-  // or no navigator.gpu) stay on WASM. If navigator.gpu is present but the adapter is
-  // actually unusable, the worker's init try/catch falls back to CPU on its own.
+  // Run the GPU tier on WebGPU when an adapter is reachable. If the GPU tier is selected
+  // but there's NO adapter (navigator.gpu absent), we can't run it on CPU either — only
+  // its fp32/q4 files are vendored, not q8 — so fall back to the Standard CPU model.
+  // (If navigator.gpu IS present but the adapter is unusable, the worker's own init
+  // try/catch drops to the CPU model — see transcriber.worker.ts.)
   const gpuPresent = typeof navigator !== 'undefined' && !!navigator.gpu;
-  const desiredDevice: 'webgpu' | 'wasm' = GPU_MODELS.has(desiredModel) && gpuPresent ? 'webgpu' : 'wasm';
+  let desiredDevice: 'webgpu' | 'wasm' = 'wasm';
+  if (GPU_MODELS.has(desiredModel)) {
+    if (gpuPresent) desiredDevice = 'webgpu';
+    else desiredModel = 'whisper-base.en'; // no GPU → run the Standard CPU model
+  }
 
   // A worker already exists but for a different model OR backend → tear it down so it
   // rebuilds. Safe because we only reach here between dictations (start() warm-up or
