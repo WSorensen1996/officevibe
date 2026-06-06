@@ -13,9 +13,8 @@ OfficeVibe is derived from **[`shahar061/the-office`](https://github.com/shahar0
 In particular, the office-rendering engine under `src/renderer/src/scene/office/`
 (e.g. `pathfinding.ts`, `TiledMapRenderer.ts`, `Camera.ts`, `SeatPool.ts`,
 `Character.ts`, `CharacterSprite.ts`, `SpriteAdapter.ts`, `ToolBubble.ts`,
-`portraitArt.ts`) and the Tiled maps under `src/renderer/src/assets/maps/`
-(`office.tmj`, `lobby.tmj`) are ported or adapted from that project, which is
-licensed under the ISC license:
+`portraitArt.ts`) and the Tiled map `src/renderer/src/assets/maps/office.tmj`
+are ported or adapted from that project, which is licensed under the ISC license:
 
 ```
 ISC License
@@ -39,10 +38,8 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ## 2. Pixel art — LimeZu (FREE VERSION license, NON-COMMERCIAL)
 
-The tilesets (`src/renderer/src/assets/tilesets/*.png`) and the base character
-walk sheets used as recolor sources
-(`src/renderer/src/assets/characters/{Adam,Alex,Amelia,Bob}_walk.png`) are
-LimeZu pixel-art assets, distributed under the **LimeZu FREE VERSION license**
+The tilesets (`src/renderer/src/assets/tilesets/*.png`) are LimeZu pixel-art
+assets, distributed under the **LimeZu FREE VERSION license**
 (see `src/renderer/src/assets/tilesets/LIMEZUASSETS-LICENSE.txt`):
 
 ```
@@ -58,23 +55,11 @@ YOU CAN'T EDIT THE SPRITES AND USE THEM IN COMMERCIAL PROJECTS
 YOU CAN'T EDIT AND RESELL THE SPRITES
 ```
 
-The recolored Office-cast sprites in this repo are derived edits of these base
-sheets and inherit the same **non-commercial** restriction. If OfficeVibe is ever
-used commercially, these assets must be removed/replaced or a paid LimeZu license
-obtained.
-
----
-
-## 3. Office tileset — Donarg
-
-`src/renderer/src/assets/tilesets/A2 Office Floors.png` is governed by the
-**Donarg Office Tileset License Agreement** (license text embedded in the PNG):
-
-```
-Donarg Office Tileset License Agreement
-Credit is not required but appreciated (Donarg).
-Any violation of this agreement will result in the termination of the license.
-```
+OfficeVibe is a personal, **non-commercial** project, consistent with this
+license. The on-screen Office cast is **not** LimeZu art (it is drawn
+procedurally in `scene/office/portraitArt.ts`); the LimeZu character base sheets
+are no longer used and have been removed. If OfficeVibe is ever used commercially,
+these tilesets must be removed/replaced or a paid LimeZu license obtained.
 
 ---
 

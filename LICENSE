@@ -36,8 +36,8 @@ licensed separately. See THIRD-PARTY-NOTICES.md for the full texts.
    remain subject to the ISC license (which is compatible with MIT but requires
    retaining the original copyright and permission notice).
 
-2. Pixel-art assets (NON-COMMERCIAL). The assets under
-   src/renderer/src/assets/tilesets/ and src/renderer/src/assets/characters/ are
-   LimeZu (FREE VERSION) and Donarg assets, licensed for NON-COMMERCIAL use only.
-   They are NOT covered by the MIT grant above and may not be used commercially
-   without obtaining the appropriate paid license or replacing them.
+2. Pixel-art assets (NON-COMMERCIAL). The tilesets under
+   src/renderer/src/assets/tilesets/ are LimeZu (FREE VERSION) assets, licensed
+   for NON-COMMERCIAL use only. They are NOT covered by the MIT grant above and
+   may not be used commercially without obtaining a paid LimeZu license or
+   replacing them. (The on-screen cast is drawn procedurally and is not affected.)
