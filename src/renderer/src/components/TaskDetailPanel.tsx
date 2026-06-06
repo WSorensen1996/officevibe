@@ -19,9 +19,13 @@ import {
 /** The agent update history (display-only). Shared by the read view and the edit
  *  view so the full progress log is visible however the card was opened. Renders
  *  every update at full length (Markdown) with its kind, author, and timestamp. */
-function TaskUpdates({ updates, nameFor }: {
-  updates: { kind: keyof typeof UPDATE_COLOR; by?: string; ts?: string; text: string }[];
+type Update = { kind: keyof typeof UPDATE_COLOR; by?: string; ts?: string; text: string };
+
+function TaskUpdates({ updates, nameFor, onNewTaskFromUpdate }: {
+  updates: Update[];
   nameFor: (id?: string) => string | undefined;
+  /** Spin a new task off this specific update (linked back to the parent task). */
+  onNewTaskFromUpdate?: (u: Update) => void;
 }) {
   return (
     <Section title={`UPDATES (${updates.length})`}>
@@ -40,6 +44,19 @@ function TaskUpdates({ updates, nameFor }: {
               {nameFor(u.by) ?? u.by}
               {u.ts ? ` · ${new Date(u.ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : ''}
             </span>
+            {onNewTaskFromUpdate && (
+              <button
+                onClick={() => onNewTaskFromUpdate(u)}
+                title="New task from this update"
+                style={{
+                  marginLeft: 'auto', flexShrink: 0,
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  padding: '2px 5px 1px', border: 'none', cursor: 'pointer',
+                  background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+                  color: 'var(--cth-ink-700)'
+                }}
+              ><Icon name="plus" /></button>
+            )}
           </div>
           <Markdown>{u.text}</Markdown>
         </div>
@@ -356,7 +373,18 @@ export function TaskDetailPanel() {
         <div style={bottomPane}>
           <SelectionToTask task={task}>
             <Deliverables slugs={deliverables} />
-            <TaskUpdates updates={updates} nameFor={nameFor} />
+            <TaskUpdates
+              updates={updates}
+              nameFor={nameFor}
+              onNewTaskFromUpdate={(u) => {
+                // Seed a new task quoting this update and linking back to THIS task.
+                setNewTaskSeed({
+                  description: `Re: ${task.title} — update (${nameFor(u.by) ?? u.by ?? 'agent'}): "${u.text}"`,
+                  dependsOn: [task.id]
+                });
+                openTask(NEW_TASK_ID);
+              }}
+            />
           </SelectionToTask>
         </div>
       </div>

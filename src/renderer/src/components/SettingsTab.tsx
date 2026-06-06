@@ -19,6 +19,50 @@ const STT_MODELS: { id: SttModelId; title: string; detail: string }[] = [
   { id: 'whisper-tiny.en', title: 'Fast', detail: 'Quicker · ~44 MB, lower accuracy' }
 ];
 
+/** Read-only reference of the app's keyboard shortcuts, grouped by where they
+ *  apply. Pure copy — keep in sync with the handlers in App.tsx, MicButton,
+ *  TasksKanban/TaskDetailPanel, the composers, CodeEditor and the terminal. */
+const SHORTCUT_GROUPS: { group: string; items: { keys: string[]; label: string }[] }[] = [
+  {
+    group: 'General',
+    items: [
+      { keys: ['⌘/Ctrl', '↵'], label: 'Open a new task (when no task view is open)' },
+      { keys: ['⌘/Ctrl', 'Shift', 'M'], label: 'Toggle voice dictation in the new-task form' }
+    ]
+  },
+  {
+    group: 'Command Center',
+    items: [
+      { keys: ['1', '–', '8'], label: 'Switch tab (1 tasks, 2 agents, 3 memory, 4 skills, 5 activity, 6 commands, 7 connections, 8 settings)' }
+    ]
+  },
+  {
+    group: 'Task view',
+    items: [
+      { keys: ['⌘/Ctrl', '↵'], label: 'Create & dispatch the task' },
+      { keys: ['↵'], label: 'Create the task (from the title field)' },
+      { keys: ['Esc'], label: 'Close the task view' }
+    ]
+  },
+  {
+    group: 'Messages & queue',
+    items: [
+      { keys: ['↵'], label: 'Send message / queue prompt' },
+      { keys: ['Shift', '↵'], label: 'New line in the composer' },
+      { keys: ['⌘/Ctrl', '↵'], label: 'Send a thread reply' }
+    ]
+  },
+  {
+    group: 'Editor & terminal',
+    items: [
+      { keys: ['⌘/Ctrl', 'S'], label: 'Save the open file' },
+      { keys: ['⌘/Ctrl', '+ / −'], label: 'Zoom terminal text in / out' },
+      { keys: ['⌘/Ctrl', '0'], label: 'Reset terminal zoom' },
+      { keys: ['Esc'], label: 'Exit fullscreen terminal / file editor' }
+    ]
+  }
+];
+
 /** Slack fields live on the main-process config; the renderer mirror type doesn't
  *  declare them, so read them off a widened view. */
 type SlackConfig = HarnessConfig & {
@@ -466,6 +510,37 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
         )}
       </Section>
 
+      <Section title="KEYBOARD SHORTCUTS">
+        <div style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)', marginBottom: 8 }}>
+          ⌘ on macOS, Ctrl elsewhere. ↵ is Enter / Return.
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {SHORTCUT_GROUPS.map((g) => (
+            <div key={g.group}>
+              <div style={{
+                fontFamily: 'var(--cth-font-display)', fontSize: 8, lineHeight: '12px',
+                color: 'var(--cth-ink-700)', textTransform: 'uppercase', marginBottom: 4
+              }}>{g.group}</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {g.items.map((s) => (
+                  <div key={s.label} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <div style={{ display: 'flex', gap: 4, flexShrink: 0, flexWrap: 'wrap', width: 156 }}>
+                      {s.keys.map((k, i) => (
+                        <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          {i > 0 && <span style={{ fontSize: 11, color: 'var(--cth-ink-300)' }}>+</span>}
+                          <Kbd>{k}</Kbd>
+                        </span>
+                      ))}
+                    </div>
+                    <span style={{ fontSize: 13, lineHeight: '18px', color: 'var(--cth-ink-700)' }}>{s.label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+
       <Section title="DANGER ZONE">
         <p style={{ margin: '0 0 10px', fontSize: 14, lineHeight: '20px', color: 'var(--cth-ink-700)' }}>
           Reset wipes Michael's memories, the entire active project (every agent, message, task, and
@@ -496,6 +571,19 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function Muted({ children }: { children: React.ReactNode }) {
   return <div style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>{children}</div>;
+}
+
+/** A single pixel-styled keycap for the shortcuts reference. */
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      minWidth: 18, padding: '2px 5px 1px',
+      background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+      fontFamily: 'var(--cth-font-mono, monospace)', fontSize: 11, lineHeight: '14px',
+      color: 'var(--cth-ink-900)', whiteSpace: 'nowrap'
+    }}>{children}</span>
+  );
 }
 
 /** A labelled on/off row: title + caption on the left, a toggle button on the right. */

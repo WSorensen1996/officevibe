@@ -9,6 +9,7 @@ import { type AccentColorName } from '@/design/tokens';
 import { type HarnessConfig, type EffortLevel, buildSpawnCommand, AGENT_MODELS, AGENT_EFFORTS } from '@/store/config';
 
 const ACCENTS: AccentColorName[] = ['coral', 'mint', 'sky', 'lemon', 'lilac', 'peach'];
+const MAX_AGENT_COUNT = 12;
 
 function basename(path: string): string {
   return path.split('/').filter(Boolean).pop() ?? path;
@@ -27,7 +28,13 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
   const addAgent = useStore(s => s.addAgent);
   const agents = useStore(s => s.agents);
 
-  const [name, setName] = useState('Jim');
+  // Name is derived from the chosen character — the editable Name field was
+  // removed as redundant (the character's displayName already names the agent),
+  // but the hive/store entry still needs a name, so we keep it in state and let
+  // the character picker set it. Default it from DEFAULT_CHARACTER so it stays
+  // in sync rather than hardcoding a string.
+  const defaultName = OFFICE_CAST.find((c) => c.name === DEFAULT_CHARACTER)?.displayName ?? 'Agent';
+  const [name, setName] = useState(defaultName);
   const [character, setCharacter] = useState<OfficeCharacterName>(DEFAULT_CHARACTER);
   const [accent, setAccent] = useState<AccentColorName>('sky');
   // Default the folder to the one other agents already run in, so adding a
@@ -60,6 +67,8 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
   const [isolate, setIsolate] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
+  // How many agents to spawn in one go — all share the settings chosen above.
+  const [count, setCount] = useState(1);
 
   const pickFolder = async () => {
     setError(undefined);
@@ -74,56 +83,69 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
     if (!cwd) { setError('Pick a folder first'); return; }
     if (!command.trim()) { setError('Command is required'); return; }
 
-    setBusy(true);
-    const id = uniqueId(name);
-    const ptyId = `pty-${id}`;
+    const n = Math.max(1, Math.min(MAX_AGENT_COUNT, Math.floor(count) || 1));
+    const baseName = name.trim();
     // The command field contains `claude --permission-mode bypassPermissions`
     // for auto mode. Split into argv-style for node-pty.
     const [exe, ...args] = command.trim().split(/\s+/);
-    const spawnRes = await window.cth.spawnPty({
-      id: ptyId,
-      cwd,
-      command: exe,
-      args,
-      cols: 100,
-      rows: 30,
-      // When set, the main process spawns this agent in its own git worktree.
-      isolate,
-      // Provision this agent in the hive (memory + mailbox + identity/protocol).
-      hive: {
-        id,
-        name: name.trim(),
-        cwd,
-        role: description.trim() || undefined
-      }
-    });
-    if (!spawnRes.ok) {
-      setBusy(false);
-      setError(spawnRes.error ?? 'spawn failed');
-      return;
-    }
 
-    const agent: Agent = {
-      id,
-      name: name.trim(),
-      character,
-      accent,
-      description: description.trim() || 'a fresh harness',
-      project: basename(cwd),
-      tmuxTarget: '',
-      cwd,
-      goal: goal.trim() || undefined,
-      status: 'idle',
-      action: 'starting up',
-      progress: 0,
-      currentStation: 'desk',
-      ptyId,
-      command: command.trim(),
-      model,
-      effort,
-      recentTextTs: Date.now()
-    };
-    addAgent(agent);
+    setBusy(true);
+    // Spawn N identical agents sequentially so their ids/ptys never race. Each
+    // gets a freshly-derived unique id; when n>1 we also append the loop index,
+    // since uniqueId() is seeded by Date.now() which can repeat within a tight
+    // synchronous loop. All other settings are shared across the N.
+    for (let i = 0; i < n; i++) {
+      const id = n > 1 ? `${uniqueId(baseName)}-${i + 1}` : uniqueId(baseName);
+      const ptyId = `pty-${id}`;
+      const spawnRes = await window.cth.spawnPty({
+        id: ptyId,
+        cwd,
+        command: exe,
+        args,
+        cols: 100,
+        rows: 30,
+        // When set, the main process spawns this agent in its own git worktree.
+        isolate,
+        // Provision this agent in the hive (memory + mailbox + identity/protocol).
+        hive: {
+          id,
+          name: baseName,
+          cwd,
+          role: description.trim() || undefined
+        }
+      });
+      if (!spawnRes.ok) {
+        setBusy(false);
+        setError(
+          n > 1
+            ? `spawned ${i} of ${n}; agent #${i + 1} failed: ${spawnRes.error ?? 'spawn failed'}`
+            : (spawnRes.error ?? 'spawn failed')
+        );
+        return;
+      }
+
+      const agent: Agent = {
+        id,
+        name: baseName,
+        character,
+        accent,
+        description: description.trim() || 'a fresh harness',
+        project: basename(cwd),
+        tmuxTarget: '',
+        cwd,
+        goal: goal.trim() || undefined,
+        status: 'idle',
+        action: 'starting up',
+        progress: 0,
+        currentStation: 'desk',
+        ptyId,
+        command: command.trim(),
+        model,
+        effort,
+        recentTextTs: Date.now()
+      };
+      addAgent(agent);
+    }
     setBusy(false);
     onClose();
   };
@@ -146,15 +168,6 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
           noPadding
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: 16 }}>
-            <Row label="Name">
-              <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Ada"
-                style={inputStyle}
-              />
-            </Row>
-
             <Row label="Folder">
               {config.registeredRepos.length > 0 && (
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
@@ -347,6 +360,35 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
               </div>
             </Row>
 
+            <Row label="Count">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <PixelButton
+                  variant="secondary"
+                  size="md"
+                  disabled={busy || count <= 1}
+                  onClick={() => setCount((c) => Math.max(1, c - 1))}
+                >−</PixelButton>
+                <span style={{
+                  minWidth: 36, textAlign: 'center',
+                  fontFamily: 'var(--cth-font-display)',
+                  fontSize: 'var(--cth-text-display-md)',
+                  lineHeight: 'var(--cth-lh-display-md)',
+                  color: 'var(--cth-ink-900)'
+                }}>{count}</span>
+                <PixelButton
+                  variant="secondary"
+                  size="md"
+                  disabled={busy || count >= MAX_AGENT_COUNT}
+                  onClick={() => setCount((c) => Math.min(MAX_AGENT_COUNT, c + 1))}
+                >+</PixelButton>
+                <span style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginLeft: 4 }}>
+                  {count > 1
+                    ? `spawns ${count} agents, all with the settings above`
+                    : 'spawn a single agent'}
+                </span>
+              </div>
+            </Row>
+
             {error && (
               <div style={{
                 padding: '6px 10px',
@@ -362,7 +404,7 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
               <PixelButton variant="ghost" size="md" onClick={onClose} disabled={busy}>cancel</PixelButton>
               <PixelButton variant="primary" size="md" onClick={submit} disabled={busy}>
-                {busy ? 'spawning...' : 'spawn'}
+                {busy ? 'spawning...' : (count > 1 ? `spawn ${count}` : 'spawn')}
               </PixelButton>
             </div>
           </div>

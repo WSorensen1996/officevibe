@@ -56,7 +56,7 @@ export function AgentCard({
       }}
       className="cth-titlebar-nodrag"
       style={{
-        width: 220, minWidth: 220,
+        width: 220, minWidth: 220, flexShrink: 0,
         padding: 0, cursor: 'pointer', textAlign: 'left'
       }}
     >
@@ -66,6 +66,23 @@ export function AgentCard({
         style={{ padding: 8 }}
         noPadding
       >
+        {/* GREEN pick-marker — unmistakably flags the currently-selected agent,
+            sitting in the top-left corner on top of the accent frame (not a replacement). */}
+        {selected && (
+          <span
+            aria-label="selected agent"
+            title="selected"
+            style={{
+              position: 'absolute', top: 3, left: 3, zIndex: 2,
+              width: 16, height: 16,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'var(--cth-status-success)',
+              color: 'var(--cth-ink-900)',
+              boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
+              fontFamily: 'var(--cth-font-display)', fontSize: 10, lineHeight: '10px'
+            }}
+          >✓</span>
+        )}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div style={{ display: 'flex', gap: 8 }}>
             <div style={{
@@ -135,12 +152,13 @@ export function AgentCard({
           {/* Model picker + restart + tool-call count. Stops click propagation so
               using the controls never re-selects the card. */}
           {onPickModel && (
-            <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                 <Select
                   value={model ?? ''}
                   disabled={!canRestart || restarting}
                   onChange={(v) => onPickModel(v || undefined)}
+                  style={{ flex: 1, minWidth: 0 }}
                 >
                   {AGENT_MODELS.map((m) => (
                     <option key={m.label} value={m.id ?? ''}>
@@ -153,6 +171,7 @@ export function AgentCard({
                   size="sm"
                   disabled={!canRestart || restarting}
                   onClick={onRestart}
+                  style={{ flexShrink: 0 }}
                 >restart</PixelButton>
               </div>
               {onPickEffort && (
@@ -160,6 +179,7 @@ export function AgentCard({
                   value={effort ?? ''}
                   disabled={!canRestart || restarting}
                   onChange={(v) => onPickEffort((v || undefined) as EffortLevel | undefined)}
+                  style={{ width: '100%', minWidth: 0 }}
                 >
                   {AGENT_EFFORTS.map((e) => (
                     <option key={e.label} value={e.id ?? ''}>

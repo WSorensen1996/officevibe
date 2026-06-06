@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useStore, selectedAgent, isAgentTab } from '@/store/store';
+import { useStore, selectedAgent, isAgentTab, NEW_TASK_ID } from '@/store/store';
 import { startMockLoop, stopMockLoop } from '@/store/mockEvents';
 import type { HarnessConfig } from '@/store/config';
 import { OfficeFloor } from '@/scene/office/OfficeFloor';
@@ -117,6 +117,27 @@ export function App() {
   useEffect(() => {
     window.cth.browser?.setVisible(browserShown);
   }, [browserShown]);
+
+  // ⌘/Ctrl+Enter anywhere opens a fresh "create task" view — a fast way to capture
+  // a task without reaching for the board's "add task" button. Guarded so it never
+  // collides with the combos that already own ⌘/Ctrl+Enter: it bails when a task
+  // view is already open (its form uses it to create) and when focus is in an
+  // editable field (the message composers use it to send).
+  useEffect(() => {
+    if (!config?.onboardingComplete) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      if (overlayOpen || useStore.getState().openTaskId) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      e.preventDefault();
+      const st = useStore.getState();
+      st.setNewTaskSeed(null);
+      st.openTask(NEW_TASK_ID);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [config?.onboardingComplete, overlayOpen]);
 
   if (!config) {
     return <div style={{ width: '100vw', height: '100vh', background: 'var(--cth-cream-100)' }} />;

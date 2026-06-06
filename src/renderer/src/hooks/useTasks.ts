@@ -45,6 +45,8 @@ interface TasksStore {
   unarchiveTask: (id: string) => void;
   markTaskRead: (id: string) => void;
   dispatchTask: (t: ProjectTask) => Promise<void>;
+  /** Dispatch every not-yet-dispatched `todo` task in one batch (one persist + one toast). */
+  dispatchAllTodo: () => Promise<void>;
 }
 
 let dispatchMsgTimer: ReturnType<typeof setTimeout> | null = null;
@@ -200,6 +202,44 @@ const useTasksStore = create<TasksStore>((set, get) => ({
         ? '⚠ no active agent received this'
         : `dispatched to ${name}`);
     }
+  },
+
+  // Bulk version of dispatchTask for the TODO column: send every not-yet-dispatched
+  // todo task to its assignee (Michael if unassigned), then ONE persist stamping all
+  // of them + ONE startFloor + ONE summary toast. Already-dispatched todos are
+  // skipped so it can never re-spam. Modeled on dispatchTask, not a loop over it.
+  dispatchAllTodo: async () => {
+    const setMsg = (msg: string | null): void => {
+      set({ dispatchMsg: msg });
+      if (dispatchMsgTimer) clearTimeout(dispatchMsgTimer);
+      if (msg !== null) dispatchMsgTimer = setTimeout(() => set({ dispatchMsg: null }), 5000);
+    };
+    const todo = get().tasks.filter((t) => t.status === 'todo' && !t.archived && !t.dispatchedAt);
+    if (todo.length === 0) return;
+    const sent = new Set<string>();
+    let delivered = 0;
+    let failed = 0;
+    for (const t of todo) {
+      const desc = t.description?.trim() ? t.description.trim() : '(no description)';
+      const to = t.assignee ?? 'god';
+      const body = `Task: ${t.title} [task:${t.id}]\nContext: ${desc}\n`;
+      const res = await window.cth.projectSend(
+        { to, act: 'request', subject: 'Task from you', body }, 'human');
+      if (res.ok) { sent.add(t.id); delivered += res.delivered ?? 0; }
+      else { failed += 1; }
+    }
+    if (sent.size > 0) {
+      const stamp = new Date().toISOString();
+      // Map over the live store array (not the captured list) so a concurrent edit
+      // isn't clobbered; stamp only the ones that actually went out.
+      await get().persist(get().tasks.map((x) =>
+        (sent.has(x.id) ? { ...x, dispatchedAt: stamp } : x)));
+      useStore.getState().startFloor();
+    }
+    setMsg(
+      `dispatched ${sent.size} task${sent.size === 1 ? '' : 's'}` +
+      (failed ? ` · ${failed} failed` : '') +
+      (sent.size > 0 && delivered === 0 ? ' · ⚠ no active agent received them' : ''));
   }
 }));
 
@@ -262,6 +302,7 @@ export function useTasks() {
     archiveAllDone: s.archiveAllDone,
     unarchiveTask: s.unarchiveTask,
     markTaskRead: s.markTaskRead,
-    dispatchTask: s.dispatchTask
+    dispatchTask: s.dispatchTask,
+    dispatchAllTodo: s.dispatchAllTodo
   };
 }

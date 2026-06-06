@@ -527,8 +527,11 @@ export const useStore = create<State>((set) => ({
   reconcileWithLivePtys: (livePtyIds) =>
     set((s) => {
       const live = new Set(livePtyIds);
-      // Keep agents with no PTY (synthetic) or whose PTY is still alive.
-      const agents = s.agents.filter((a) => !a.ptyId || live.has(a.ptyId));
+      // Keep agents with no PTY (synthetic), a still-alive PTY, OR any non-archived
+      // agent — those get RE-SPAWNED on startup (god/assistant via useProject effects
+      // #1/#1b, manually-added workers via #1d). Pruning a dead worker here would
+      // orphan its inbox (the Kevin-zombie bug); only archived dead agents are dropped.
+      const agents = s.agents.filter((a) => !a.ptyId || live.has(a.ptyId) || !a.archived);
       if (agents.length === s.agents.length) return s;
       const feeds: Record<string, string[]> = {};
       for (const a of agents) feeds[a.id] = s.feeds[a.id] ?? [];

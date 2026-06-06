@@ -33,6 +33,27 @@ const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'
 export function CommandCenterPanel({ agent }: { agent: Agent }) {
   const [tab, setTab] = useState<CCTab>('tasks');
 
+  // Number-key shortcuts: 1..N jump straight to the matching tab (tasks=1,
+  // agents=2, …). Ignored when a modifier is held or focus is in a text field /
+  // terminal, so typing a digit into an input/textarea/select passes through.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return;
+      if (e.key >= '1' && e.key <= '9') {
+        const idx = Number(e.key) - 1;
+        if (idx < TABS.length) {
+          e.preventDefault();
+          setTab(TABS[idx].key);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   return (
     <PixelPanel
       variant="default"
@@ -61,10 +82,11 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
         display: 'flex', gap: 4, padding: '6px 8px 0',
         background: 'var(--cth-cream-100)', borderBottom: '1px solid var(--cth-ink-700)', flexShrink: 0
       }}>
-        {TABS.map((t) => (
+        {TABS.map((t, i) => (
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
+            title={i < 9 ? `${t.label} — press ${i + 1}` : t.label}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 4,
               padding: '4px 9px 3px', border: 'none', cursor: 'pointer',
@@ -76,6 +98,9 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
               fontFamily: 'var(--cth-font-ui)', fontSize: 13
             }}
           >
+            {i < 9 && (
+              <span style={{ fontSize: 10, opacity: 0.55, fontFamily: 'var(--cth-font-display)' }}>{i + 1}</span>
+            )}
             <Icon name={t.icon} /> {t.label}
           </button>
         ))}

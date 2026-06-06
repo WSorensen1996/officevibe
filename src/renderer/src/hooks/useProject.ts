@@ -71,6 +71,9 @@ export function useProject(config: HarnessConfig | null): void {
   // the spawnPty call is otherwise racy).
   const godSpawning = useRef(false);
   const assistantSpawning = useRef(false);
+  // In-flight guard for the worker-respawn pass (effect #1d). Idempotency across
+  // genuine remounts comes from the live-PTY check; this just blocks a concurrent run.
+  const workerSpawning = useRef(false);
   // Per-agent debounce timers for the Browser-tab "is-browsing" cue: each agent's
   // mcp__browser__* tool resets its own timer, so the cue stays lit through that
   // agent's browsing burst and fades a few seconds after its last action.
@@ -219,6 +222,60 @@ export function useProject(config: HarnessConfig | null): void {
       useStore.getState().addAgent(assistant);
       useStore.getState().select(prevSel ?? GOD_ID);
     }, 400);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [config?.onboardingComplete, config?.activeProjectPath, godStatus]);
+
+  // 1d) Respawn manually-added WORKER agents after an app/renderer restart. Effects
+  //     #1/#1b only revive god + the assistant; without this, a restored worker (e.g.
+  //     Kevin) keeps a dead PTY and lingers in the roster, so messages route to an
+  //     inbox nobody is reading. Once Michael is ready, list the live PTYs and respawn
+  //     every persisted non-god/non-assistant/non-archived agent whose PTY is gone,
+  //     reusing its OWN id/cwd/model/effort (mirrors the per-agent Restart spawn shape
+  //     in useAgentRestart). Idempotent: a worker already live is filtered out, so a
+  //     plain renderer reload (PTYs survived) respawns nothing.
+  useEffect(() => {
+    if (!config?.onboardingComplete || !config.activeProjectPath) return;
+    if (godStatus !== 'ready') return;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      if (cancelled || workerSpawning.current) return;
+      const live = await window.cth.listPtys().catch(() => []);
+      if (cancelled) return;
+      const liveIds = new Set(live.map((p) => p.id));
+      const workers = useStore.getState().agents.filter(
+        (a) => !a.isGod && !a.isAssistant && !a.archived && a.ptyId && !liveIds.has(a.ptyId));
+      if (workers.length === 0) return;
+      // Synchronous guard (no await between this check and the set) → no concurrent pass.
+      if (cancelled || workerSpawning.current) return;
+      workerSpawning.current = true;
+      try {
+        const cfg = (await window.cth.getConfig().catch(() => null)) ?? config;
+        if (!cfg || cancelled) return;
+        for (const a of workers) {
+          if (cancelled) break;
+          try {
+            // Re-derive the command from the agent's own model/effort, exactly like a
+            // per-agent restart. The PTY is already dead, so there's nothing to kill.
+            const command = buildSpawnCommand(cfg, a.model, a.effort);
+            const [exe, ...args] = command.trim().split(/\s+/);
+            const res = await window.cth.spawnPty({
+              id: a.ptyId!,
+              cwd: a.cwd,
+              command: exe,
+              args,
+              cols: 100,
+              rows: 30,
+              hive: { id: a.id, name: a.name, cwd: a.cwd, role: a.description }
+            });
+            if (!cancelled && res.ok) {
+              useStore.getState().updateAgent(a.id, { command: command.trim(), status: 'idle', action: 'reconnecting…' });
+            }
+          } catch { /* leave this agent as-is; the next startup retries it */ }
+        }
+      } finally {
+        workerSpawning.current = false;
+      }
+    }, 800);
     return () => { cancelled = true; clearTimeout(t); };
   }, [config?.onboardingComplete, config?.activeProjectPath, godStatus]);
 

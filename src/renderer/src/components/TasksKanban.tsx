@@ -47,7 +47,8 @@ export function TasksKanban() {
     archiveTask,
     archiveAllDone,
     unarchiveTask,
-    dispatchTask
+    dispatchTask,
+    dispatchAllTodo
   } = useTasks();
 
   const nameFor = (id?: string): string | undefined =>
@@ -88,6 +89,8 @@ export function TasksKanban() {
         {COLUMNS.map((col) => {
           const cards = active.filter((t) => t.status === col.key);
           const unread = cards.filter(isTaskUnread).length;
+          // TODO column only: how many todos haven't been dispatched yet (drives DISPATCH ALL).
+          const undispatched = col.key === 'todo' ? cards.filter((t) => !t.dispatchedAt).length : 0;
           return (
             <div key={col.key} style={{
               flex: '1 1 0', minWidth: 170, display: 'flex', flexDirection: 'column',
@@ -126,6 +129,23 @@ export function TasksKanban() {
                     }}
                   >
                     <Icon name="folder" /> archive all
+                  </button>
+                )}
+                {/* Dispatch-all: send every not-yet-dispatched TODO to its assignee in
+                    one batch. Only on TODO, only when something's undispatched. */}
+                {col.key === 'todo' && undispatched > 0 && (
+                  <button
+                    onClick={dispatchAllTodo}
+                    title="Dispatch every not-yet-dispatched task in this column to its assignee"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 4,
+                      padding: '1px 6px 0', border: 'none', cursor: 'pointer',
+                      background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+                      fontFamily: 'var(--cth-font-display)', fontSize: 8, textTransform: 'uppercase',
+                      color: 'var(--cth-ink-900)'
+                    }}
+                  >
+                    <Icon name="arrow-right" /> dispatch all
                   </button>
                 )}
               </div>
@@ -202,7 +222,7 @@ function ArchivedTaskRow({ task, onRestore, onDelete }: {
       background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
     }}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-700)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title}</div>
+        <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-700)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayTitle(task)}</div>
         {last && (
           <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             <span style={{ textTransform: 'uppercase', fontFamily: 'var(--cth-font-display)', fontSize: 8, marginRight: 4 }}>{last.kind}</span>{last.text}
@@ -281,7 +301,7 @@ function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, 
         <span style={{
           flex: 1, minWidth: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 13,
           lineHeight: '16px', color: 'var(--cth-ink-900)'
-        }}>{task.title}</span>
+        }}>{displayTitle(task)}</span>
         {unread && (
           <span
             title="New activity since you last opened this"
@@ -369,8 +389,9 @@ function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, 
         <select
           value={task.status}
           onChange={(e) => onMove(e.target.value as Status)}
+          // Width fits the lane label rather than stretching across the card.
           style={{
-            flex: 1, padding: '2px 4px', background: 'var(--cth-paper-100)', border: 'none',
+            width: 'auto', minWidth: 0, padding: '2px 4px', background: 'var(--cth-paper-100)', border: 'none',
             boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)',
             fontSize: 11, color: 'var(--cth-ink-900)', cursor: 'pointer'
           }}
@@ -389,6 +410,7 @@ function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, 
           title="Archive task (file it away — restorable from the ARCHIVED section)"
           style={{
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+            marginLeft: 'auto',
             padding: '3px 7px 2px', border: 'none', cursor: 'pointer',
             background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
             color: 'var(--cth-ink-900)'
@@ -499,6 +521,20 @@ function AttachmentTile({ att, onRemove }: { att: TaskAttachment; onRemove?: () 
 
 // ─── Add-task form ─────────────────────────────────────────────────────────--
 
+// The title is optional for new tasks: when it's blank we name the task from the
+// first non-empty line of its description so board cards never render nameless.
+function deriveTitleFromDescription(description: string): string {
+  const firstLine = description.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  if (!firstLine) return 'Untitled task';
+  return firstLine.length > 80 ? `${firstLine.slice(0, 79).trimEnd()}…` : firstLine;
+}
+
+// What to SHOW for a task's title. Titles are optional, so an empty one falls back
+// to the description's first line (then 'Untitled task') — never a blank card.
+function displayTitle(task: ProjectTask): string {
+  return task.title?.trim() ? task.title : deriveTitleFromDescription(task.description ?? '');
+}
+
 export function AddTaskForm({ agents, existing, initial, seed, initialMission, onCancel, onSubmit, onCreateAndDispatch, onDelete, onArchive, onDispatch }: {
   agents: { id: string; name: string; isGod?: boolean }[];
   existing: ProjectTask[];
@@ -530,7 +566,9 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   const [draft0] = useState(() => (initial ? null : useStore.getState().taskDraft));
   const [title, setTitle] = useState(initial?.title ?? draft0?.title ?? '');
   const [description, setDescription] = useState(initial?.description ?? draft0?.description ?? seed?.description ?? '');
-  const [assignee, setAssignee] = useState(initial?.assignee ?? draft0?.assignee ?? '');
+  // New tasks default to Michael (god) so the assignee is never empty; editing
+  // preserves the task's existing assignee (including deliberately unassigned).
+  const [assignee, setAssignee] = useState(initial?.assignee ?? draft0?.assignee ?? (editing ? '' : 'god'));
   const [priority, setPriority] = useState(initial?.priority ?? draft0?.priority ?? 3);
   const [deps, setDeps] = useState<string[]>(initial?.dependsOn ?? draft0?.deps ?? seed?.dependsOn ?? []);
   const [status, setStatus] = useState<Status>(initial?.status ?? 'todo');
@@ -629,7 +667,9 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   // agent-owned data; the main-process writeTasks merge restores them from disk.
   const buildTask = (): ProjectTask => ({
     id: attachTaskId,
-    title: title.trim(),
+    // Title is optional — fall back to a title derived from the description so a
+    // task is never stored (or shown on the board) without a name.
+    title: title.trim() || deriveTitleFromDescription(description),
     description: description.trim() || undefined,
     assignee: assignee || undefined,
     status: editing ? status : 'todo',
@@ -660,8 +700,14 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
     setTaskDraft({ title, description, assignee, priority, deps, id: createId, attachments });
   }, [editing, setTaskDraft, title, description, assignee, priority, deps, createId, attachments]);
 
+  // The title is optional when CREATING — a new task just needs *something*
+  // (a title or a description), and a blank title is derived from the description
+  // in buildTask. EDITING still requires a title so a saved task can't lose its
+  // name by clearing the field.
+  const canSubmit = editing ? !!title.trim() : !!(title.trim() || description.trim());
+
   const submit = () => {
-    if (!title.trim()) return;
+    if (!canSubmit) return;
     onSubmit(buildTask(), buildSchedule());
   };
 
@@ -669,7 +715,7 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   // (Enter in the title, or ⌘/Ctrl+Enter anywhere in the form); EDIT mode has no
   // dispatch-on-create, so it falls back to saving.
   const submitPrimary = () => {
-    if (!title.trim() || enriching) return;
+    if (!canSubmit || enriching) return;
     if (!editing && onCreateAndDispatch) onCreateAndDispatch(buildTask(), buildSchedule());
     else submit();
   };
@@ -758,7 +804,7 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
               submitPrimary();
             }
           }}
-          placeholder="Task title…"
+          placeholder={editing ? 'Task title…' : 'Task title… (optional)'}
           style={inputStyle}
         />
         <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
@@ -991,7 +1037,7 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
         </div>
 
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <PixelButton variant="primary" size="sm" onClick={submit} disabled={!title.trim() || enriching}>
+          <PixelButton variant="primary" size="sm" onClick={submit} disabled={!canSubmit || enriching}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
               <Icon name="check" /> {editing ? 'save' : 'create'}
             </span>
@@ -1007,8 +1053,8 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
             <PixelButton
               variant="primary"
               size="sm"
-              onClick={() => { if (title.trim()) onCreateAndDispatch(buildTask(), buildSchedule()); }}
-              disabled={!title.trim() || enriching}
+              onClick={() => { if (canSubmit) onCreateAndDispatch(buildTask(), buildSchedule()); }}
+              disabled={!canSubmit || enriching}
             >
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
                 <Icon name="arrow-right" /> create &amp; dispatch
