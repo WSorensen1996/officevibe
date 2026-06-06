@@ -1,7 +1,7 @@
 import { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, shell, protocol, session } from 'electron';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { rmSync, existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs';
+import { rmSync, existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync } from 'node:fs';
 import { join, resolve, sep, extname } from 'node:path';
 import { PtyManager, type SpawnOptions } from './pty';
 import {
@@ -32,6 +32,14 @@ const isDev = !!process.env.ELECTRON_RENDERER_URL;
 protocol.registerSchemesAsPrivileged([
   { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
 ]);
+
+// [STT-WEBGPU-PROBE] Phase-1 (task 5z52): enable WebGPU so the renderer/worker can
+// probe for a GPU adapter — the go/no-go for GPU speech-to-text. Linux+Electron
+// WebGPU is gated/flaky, so these switches are required for navigator.gpu to exist.
+// Must run BEFORE app ready (module load is). enable-unsafe-webgpu turns the API on
+// where Chromium gates it; Vulkan is the WebGPU backend on Linux. REMOVE if no-go.
+app.commandLine.appendSwitch('enable-unsafe-webgpu');
+if (process.platform === 'linux') app.commandLine.appendSwitch('enable-features', 'Vulkan');
 
 /** Content-Type for a file served over the app:// protocol. */
 function mimeForPath(p: string): string {
@@ -247,6 +255,28 @@ function toHttpUrl(raw: unknown): string | null {
   const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(s);
   if (!scheme) return `https://${s}`;
   return /^https?$/i.test(scheme[1]) ? s : null;
+}
+
+/** True when `url` belongs to OUR renderer origin — the packaged `app://` bundle
+ *  or the dev Vite server (localhost). The main window's preload exposes the full
+ *  `window.cth` IPC surface on EVERY page it loads, so the window must never
+ *  navigate anywhere else (see the will-navigate guard in createWindow). */
+function isOwnAppUrl(url: string): boolean {
+  return url.startsWith('app://') ||
+    url.startsWith('http://localhost') ||
+    url.startsWith('http://127.0.0.1') ||
+    url === 'about:blank';
+}
+
+/** Open an externally-clicked link in the user's real browser — but only for safe
+ *  schemes. `shell.openExternal` on an arbitrary scheme (file:, smb:, a custom
+ *  protocol handler, …) is an OS-level footgun, so anything but http/https/mailto
+ *  is dropped. */
+function openExternalSafe(url: string): void {
+  let scheme: string;
+  try { scheme = new URL(url).protocol.replace(/:$/, '').toLowerCase(); }
+  catch { return; }
+  if (scheme === 'http' || scheme === 'https' || scheme === 'mailto') void shell.openExternal(url);
 }
 
 /** LRU-evict idle browser views once the soft cap is reached. Never evicts the
@@ -667,7 +697,9 @@ function createWindow(): void {
     show: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
+      // Sandboxed: the preload only uses contextBridge + ipcRenderer (no Node
+      // built-ins), so the OS sandbox is safe to keep on for defense in depth.
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -677,10 +709,25 @@ function createWindow(): void {
 
   win.once('ready-to-show', () => win.show());
 
+  // window.open / target=_blank → open in the system browser (safe schemes only),
+  // never as an in-app window that would inherit our preload.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    openExternalSafe(url);
     return { action: 'deny' };
   });
+
+  // Pin the privileged main window to our own origin. A top-level navigation away
+  // (e.g. clicking an http(s) link rendered in untrusted agent/task/Slack markdown)
+  // would load the destination INTO this webContents, handing it the full
+  // window.cth IPC surface (spawnPty, writeFile, …). Block it and send external
+  // links to the system browser instead — mirrors the browser pane's guard.
+  const guardNavigation = (e: { preventDefault: () => void }, url: string): void => {
+    if (isOwnAppUrl(url)) return;
+    e.preventDefault();
+    openExternalSafe(url);
+  };
+  win.webContents.on('will-navigate', guardNavigation);
+  win.webContents.on('will-redirect', guardNavigation);
 
   // On macOS, the red-X "close" event by default destroys the window — and on
   // a single-window app, that effectively quits. Intercept it the same way we
@@ -843,27 +890,76 @@ ipcMain.handle('terminal:openAtFolder', async (_evt, cwd: unknown) => {
 });
 
 // ─── IPC: config ────────────────────────────────────────────────────────────
+/** Every key the renderer is allowed to patch — anything else is dropped so a
+ *  compromised renderer can't smuggle in unexpected fields. */
+const CONFIG_KEYS: ReadonlySet<string> = new Set([
+  'onboardingComplete', 'harnessHome', 'activeProjectPath', 'projects', 'registeredRepos',
+  'autoMode', 'autoPilot', 'remoteControl', 'defaultCommand', 'defaultModel', 'defaultEffort',
+  'semanticMemory', 'embeddingModel', 'skillLearning', 'curatorIntervalMinutes',
+  'skillStaleAfterDays', 'skillArchiveAfterDays', 'maxInjectedSkills', 'skillInventoryTokenBudget',
+  'curatorBackupKeep', 'curatorUsageCeilingPercent', 'sttModel', 'autoApprove', 'missions',
+  'notifications', 'slackEnabled', 'slackSigningSecret', 'slackChannelId', 'slackPort', 'mcpServers'
+]);
+/** Shell-significant characters that have no place in a bare command name. */
+const SHELL_META = /[;&|`$(){}<>\n\r]/;
+/** Drop unknown keys and reject a `defaultCommand` carrying shell metacharacters
+ *  (defense in depth on top of the safe command resolution in pty.ts/shellEnv.ts:
+ *  defaultCommand flows into agent spawning AND the headless curator). */
+function sanitizeConfigPatch(patch: unknown): Partial<HarnessConfig> {
+  if (!patch || typeof patch !== 'object') return {};
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(patch as Record<string, unknown>)) {
+    if (!CONFIG_KEYS.has(k)) continue;
+    if (k === 'defaultCommand' && (typeof v !== 'string' || SHELL_META.test(v))) continue;
+    out[k] = v;
+  }
+  return out as Partial<HarnessConfig>;
+}
 ipcMain.handle('config:get', (): HarnessConfig => readConfig());
-ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => writeConfig(patch));
+ipcMain.handle('config:update', (_evt, patch: unknown) => writeConfig(sanitizeConfigPatch(patch)));
 ipcMain.handle('config:ensureHome', (_evt, path: unknown) => {
   if (typeof path !== 'string' || path.length === 0) return { ok: false, error: 'invalid path' };
   return ensureHarnessHome(path);
 });
 
 // ─── IPC: filesystem (sandboxed to a root) ──────────────────────────────────
+/** safeJoin in fs.ts confines the REL path within a root but never validates the
+ *  root itself — without this gate a renderer could pass root='/' and read/write
+ *  anywhere the process can. Confine `root` to a place the renderer legitimately
+ *  knows about: the active project, any known project, or a registered repo (or a
+ *  descendant of one). Returns the resolved root, or null when not allowed. */
+function allowedFsRoot(root: string): string | null {
+  const abs = resolve(root);
+  const cfg = readConfig();
+  const bases = [
+    cfg.activeProjectPath,
+    ...(cfg.projects ?? []).map((p) => p.path),
+    ...(cfg.registeredRepos ?? [])
+  ].filter((r): r is string => typeof r === 'string' && r.length > 0).map((r) => resolve(r));
+  for (const base of bases) {
+    if (abs === base || abs.startsWith(base + sep)) return abs;
+  }
+  return null;
+}
 ipcMain.handle('fs:listDir', (_evt, root: unknown, rel: unknown) => {
   if (typeof root !== 'string' || typeof rel !== 'string') return { ok: false, error: 'invalid args' };
-  return listDir(root, rel);
+  const base = allowedFsRoot(root);
+  if (!base) return { ok: false, error: 'root not allowed' };
+  return listDir(base, rel);
 });
 ipcMain.handle('fs:readFile', (_evt, root: unknown, rel: unknown) => {
   if (typeof root !== 'string' || typeof rel !== 'string') return { ok: false, error: 'invalid args' };
-  return readFileText(root, rel);
+  const base = allowedFsRoot(root);
+  if (!base) return { ok: false, error: 'root not allowed' };
+  return readFileText(base, rel);
 });
 ipcMain.handle('fs:writeFile', (_evt, root: unknown, rel: unknown, content: unknown) => {
   if (typeof root !== 'string' || typeof rel !== 'string' || typeof content !== 'string') {
     return { ok: false, error: 'invalid args' };
   }
-  return writeFileText(root, rel, content);
+  const base = allowedFsRoot(root);
+  if (!base) return { ok: false, error: 'root not allowed' };
+  return writeFileText(base, rel, content);
 });
 
 // ─── IPC: task attachments (binary, under <projectRoot>/attachments/<taskId>) ─
@@ -920,6 +1016,13 @@ function switchToProjectAndRelaunch(activeProjectPath: string, ref: ProjectRef):
   app.exit(0);
 }
 
+/** True only for a path that exists AND is a directory — guards the project
+ *  handlers from adopting a file (which later ENOTDIRs and bricks boot) or
+ *  creating project folders at an arbitrary, non-existent location. */
+function isExistingDir(p: string): boolean {
+  try { return statSync(p).isDirectory(); } catch { return false; }
+}
+
 /** Create a new project folder `officevibe-<slug>` under `parentDir`, write its
  *  manifest, make it active, and relaunch (ensureProject builds the skeleton). */
 ipcMain.handle('project:create', (_evt, payload: unknown) => {
@@ -928,6 +1031,7 @@ ipcMain.handle('project:create', (_evt, payload: unknown) => {
   if (!name) return { ok: false, error: 'project name required' };
   const cfg = readConfig();
   const parentDir = typeof p.parentDir === 'string' && p.parentDir ? p.parentDir : defaultProjectsDir(cfg);
+  if (!isExistingDir(parentDir)) return { ok: false, error: 'parent folder does not exist' };
   const path = join(parentDir, projectFolderName(name));
   if (existsSync(join(path, 'officevibe.json')) || existsSync(join(path, 'registry.json'))) {
     return { ok: false, error: 'a project already exists at ' + path };
@@ -947,7 +1051,7 @@ ipcMain.handle('project:create', (_evt, payload: unknown) => {
  *  populates an empty one); a folder with a manifest/registry is recognised as one. */
 ipcMain.handle('project:open', (_evt, path: unknown) => {
   if (typeof path !== 'string' || !path) return { ok: false, error: 'invalid path' };
-  if (!existsSync(path)) return { ok: false, error: 'folder does not exist' };
+  if (!isExistingDir(path)) return { ok: false, error: 'folder does not exist' };
   switchToProjectAndRelaunch(path, { name: deriveProjectName(path), path });
   return { ok: true, path };
 });
@@ -955,6 +1059,7 @@ ipcMain.handle('project:open', (_evt, path: unknown) => {
 /** Switch to an already-known project by path. */
 ipcMain.handle('project:switch', (_evt, path: unknown) => {
   if (typeof path !== 'string' || !path) return { ok: false, error: 'invalid path' };
+  if (!isExistingDir(path)) return { ok: false, error: 'project folder no longer exists' };
   switchToProjectAndRelaunch(path, { name: deriveProjectName(path), path });
   return { ok: true, path };
 });

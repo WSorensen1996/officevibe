@@ -56,10 +56,15 @@ export class PtyManager {
   private resolveCommand(command: string): string {
     // Already an absolute/relative path (Unix `/` or Windows `\`) — pass through.
     if (command.includes('/') || command.includes('\\')) return command;
+    // A bare command is a single token; anything with shell-significant characters
+    // is never a real executable name. Return it unchanged so node-pty execs it
+    // literally (→ ENOENT) rather than risk a shell interpreting it below.
+    if (!/^[A-Za-z0-9._-]+$/.test(command)) return command;
     if (process.platform === 'win32') {
-      // `where` is the Windows equivalent of `which`; runs via cmd.exe (shell:true).
+      // `where` is the Windows equivalent of `which`. No shell — the command is a
+      // validated bare token passed as a direct argument to where.exe.
       try {
-        const res = spawnSync('where', [command], { encoding: 'utf8', timeout: 3000, shell: true });
+        const res = spawnSync('where', [command], { encoding: 'utf8', timeout: 3000 });
         const path = (res.stdout ?? '').trim().split(/\r?\n/)[0];
         if (path && existsSync(path)) return path;
       } catch { /* fall through */ }
@@ -78,9 +83,11 @@ export class PtyManager {
       // Last resort — let node-pty try; will fail with ENOENT if missing.
       return command;
     }
-    // macOS / Linux — `which` against an interactive shell so we pick up nvm/asdf/brew paths.
+    // macOS / Linux — resolve against an interactive shell so we pick up nvm/asdf/brew
+    // paths. Pass the command as a positional arg ($1), NOT interpolated into the
+    // script string, so its value can never be interpreted by the shell.
     try {
-      const res = spawnSync(process.env.SHELL ?? '/bin/zsh', ['-ilc', `which ${command}`], {
+      const res = spawnSync(process.env.SHELL ?? '/bin/zsh', ['-ilc', 'command -v -- "$1"', '_', command], {
         encoding: 'utf8',
         timeout: 3000
       });

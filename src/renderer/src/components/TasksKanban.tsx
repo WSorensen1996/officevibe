@@ -26,6 +26,11 @@ import {
 
 export type { ProjectTask, TaskUpdate } from './tasks/taskShared';
 
+// Platform-aware label for the GLOBAL new-task shortcut (App.tsx capture-phase
+// Ctrl/Cmd+Enter → openTask(NEW_TASK_ID)). Mirrors App.tsx's IS_MAC convention.
+const IS_MAC = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC');
+const NEW_TASK_HINT = IS_MAC ? '⌘⏎' : 'Ctrl ⏎';
+
 /**
  * Task kanban over hive/tasks.json. The live ledger + every mutation live in the
  * shared `useTasks` hook (one poller, one subscription) so this board and the
@@ -47,6 +52,7 @@ export function TasksKanban() {
     setPriority,
     archiveTask,
     archiveAllDone,
+    clearAllArchived,
     unarchiveTask,
     dispatchTask,
     dispatchAllTodo,
@@ -143,16 +149,27 @@ export function TasksKanban() {
           {active.length} task{active.length === 1 ? '' : 's'}{archived.length > 0 ? ` · ${archived.length} archived` : ''}
         </span>
         {dispatchMsg && <span style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>{dispatchMsg}</span>}
-        <PixelButton
-          variant="primary"
-          size="sm"
-          onClick={() => { setNewTaskSeed(null); openTask(NEW_TASK_ID); }}
-          style={{ marginLeft: 'auto' }}
-        >
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <Icon name="plus" /> add task
-          </span>
-        </PixelButton>
+        <span title="New task (⌘/Ctrl+Enter)" style={{ marginLeft: 'auto', display: 'inline-flex' }}>
+          <PixelButton
+            variant="primary"
+            size="sm"
+            onClick={() => { setNewTaskSeed(null); openTask(NEW_TASK_ID); }}
+          >
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <Icon name="plus" /> add task
+              {/* Subtle keycap hint for the global new-task shortcut (bfy3). */}
+              <span style={{
+                marginLeft: 2, padding: '1px 4px',
+                fontFamily: 'var(--cth-font-mono, monospace)',
+                fontSize: 9, lineHeight: '12px', letterSpacing: '0.04em',
+                color: 'var(--cth-cream-300)',
+                background: 'rgba(255,255,255,0.10)',
+                boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.25)',
+                whiteSpace: 'nowrap'
+              }}>{NEW_TASK_HINT}</span>
+            </span>
+          </PixelButton>
+        </span>
       </div>
 
       {/* Columns */}
@@ -277,7 +294,7 @@ export function TasksKanban() {
         })}
       </div>
 
-      <ArchivedTasksSection tasks={archived} onRestore={unarchiveTask} onDelete={deleteTask} />
+      <ArchivedTasksSection tasks={archived} onRestore={unarchiveTask} onDelete={deleteTask} onClearAll={clearAllArchived} />
     </div>
   );
 }
@@ -347,28 +364,46 @@ function ColumnSubSection({ label, accent, cards, renderCard, headerExtra }: {
 // ─── Archived section — tasks filed off the board, restorable to their column
 //     (mirrors AgentsTab's ArchivedSection) ──────────────────────────────────--
 
-function ArchivedTasksSection({ tasks, onRestore, onDelete }: {
+function ArchivedTasksSection({ tasks, onRestore, onDelete, onClearAll }: {
   tasks: ProjectTask[];
   onRestore: (id: string) => void;
   onDelete: (id: string) => void;
+  onClearAll: () => void;
 }) {
   const [open, setOpen] = useState(false);
   if (tasks.length === 0) return null;
+  // PERMANENT bulk delete (irreversible) — gate behind an explicit confirm.
+  const clearAll = () => {
+    if (!window.confirm(`Permanently delete all ${tasks.length} archived tasks? This cannot be undone.`)) return;
+    onClearAll();
+  };
   return (
     <div style={{ flexShrink: 0, maxHeight: '38%', overflowY: 'auto', padding: '8px 10px 10px', borderTop: '1px solid var(--cth-ink-300)' }}>
       <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 9, lineHeight: '12px', color: 'var(--cth-ink-500)', marginBottom: 6 }}>
         ARCHIVED ({tasks.length})
       </div>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        style={{
-          display: 'inline-flex', alignItems: 'center', gap: 4,
-          padding: '2px 8px 1px', border: 'none', cursor: 'pointer',
-          background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
-          fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-900)',
-          marginBottom: open ? 6 : 0
-        }}
-      >{open ? '▾' : '▸'} {open ? 'hide' : 'show'} archived tasks</button>
+      {/* Toggle + bulk-clear share one row; clear-all sits in the empty space at right. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: open ? 6 : 0 }}>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            padding: '2px 8px 1px', border: 'none', cursor: 'pointer',
+            background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-900)'
+          }}
+        >{open ? '▾' : '▸'} {open ? 'hide' : 'show'} archived tasks</button>
+        <button
+          onClick={clearAll}
+          title="Permanently delete every archived task (cannot be undone)"
+          style={{
+            marginLeft: 'auto', flexShrink: 0,
+            padding: '2px 8px 1px', border: 'none', cursor: 'pointer',
+            background: 'transparent', boxShadow: 'inset 0 0 0 1px var(--cth-coral)',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-coral)'
+          }}
+        >clear all</button>
+      </div>
       {open && tasks.map((t) => (
         <ArchivedTaskRow key={t.id} task={t} onRestore={() => onRestore(t.id)} onDelete={() => onDelete(t.id)} />
       ))}

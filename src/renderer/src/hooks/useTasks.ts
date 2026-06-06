@@ -44,6 +44,8 @@ interface TasksStore {
   archiveTask: (id: string) => void;
   /** Archive every non-archived task in the `done` column in one write. */
   archiveAllDone: () => void;
+  /** PERMANENTLY delete every archived task (+ their schedules) in one write. */
+  clearAllArchived: () => void;
   unarchiveTask: (id: string) => void;
   markTaskRead: (id: string) => void;
   dispatchTask: (t: ProjectTask) => Promise<void>;
@@ -209,6 +211,19 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     persist(tasks.map((t) => (doneIds.has(t.id) ? { ...t, archived: true } : t)));
   },
 
+  // Bulk-PERMANENTLY-delete every archived task in ONE write (vs N racing
+  // deleteTask calls). Drops their linked schedules too, then persists only the
+  // surviving (non-archived) tasks — like deleteTask this removes them from
+  // tasks.json and is NOT recoverable. The caller gates this behind a confirm.
+  clearAllArchived: () => {
+    const { tasks, missions, persist, persistMissions } = get();
+    const archivedIds = new Set(tasks.filter((t) => t.archived).map((t) => t.id));
+    if (archivedIds.size === 0) return;
+    const remaining = missions.filter((m) => !(m.taskId && archivedIds.has(m.taskId)));
+    if (remaining.length !== missions.length) persistMissions(remaining);
+    persist(tasks.filter((t) => !t.archived));
+  },
+
   unarchiveTask: (id) => {
     get().persist(get().tasks.map((t) => (t.id === id ? { ...t, archived: false } : t)));
   },
@@ -372,6 +387,7 @@ export function useTasks() {
     setPriority: s.setPriority,
     archiveTask: s.archiveTask,
     archiveAllDone: s.archiveAllDone,
+    clearAllArchived: s.clearAllArchived,
     unarchiveTask: s.unarchiveTask,
     markTaskRead: s.markTaskRead,
     dispatchTask: s.dispatchTask,

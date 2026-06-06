@@ -34,10 +34,15 @@ export function userShellPath(): string {
 export function resolveCommand(command: string): string {
   // Already an absolute/relative path (Unix `/` or Windows `\`) — pass through.
   if (command.includes('/') || command.includes('\\')) return command;
+  // A bare command is a single token; anything with shell-significant characters
+  // is never a real executable name. Return it unchanged so it's exec'd literally
+  // (→ ENOENT) rather than risk a shell interpreting it below.
+  if (!/^[A-Za-z0-9._-]+$/.test(command)) return command;
   if (process.platform === 'win32') {
-    // `where` is the Windows equivalent of `which`; runs via cmd.exe (shell:true).
+    // `where` is the Windows equivalent of `which`. No shell — the command is a
+    // validated bare token passed as a direct argument to where.exe.
     try {
-      const res = spawnSync('where', [command], { encoding: 'utf8', timeout: 3000, shell: true });
+      const res = spawnSync('where', [command], { encoding: 'utf8', timeout: 3000 });
       const path = (res.stdout ?? '').trim().split(/\r?\n/)[0];
       if (path && existsSync(path)) return path;
     } catch { /* fall through */ }
@@ -55,7 +60,9 @@ export function resolveCommand(command: string): string {
     return command;
   }
   try {
-    const res = spawnSync(process.env.SHELL ?? '/bin/zsh', ['-ilc', `which ${command}`], {
+    // Pass the command as a positional arg ($1), NOT interpolated into the script
+    // string, so its value can never be interpreted by the interactive shell.
+    const res = spawnSync(process.env.SHELL ?? '/bin/zsh', ['-ilc', 'command -v -- "$1"', '_', command], {
       encoding: 'utf8',
       timeout: 3000
     });

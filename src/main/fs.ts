@@ -46,6 +46,7 @@ export async function listDir(root: string, rel: string): Promise<{
 }
 
 const MAX_READ_BYTES = 2 * 1024 * 1024; // 2 MB
+const MAX_WRITE_BYTES = 5 * 1024 * 1024; // 5 MB — guards the text write path
 
 export async function readFileText(root: string, rel: string): Promise<{
   ok: true; content: string; path: string; size: number;
@@ -71,6 +72,9 @@ export async function writeFileText(root: string, rel: string, content: string):
 } | { ok: false; error: string }> {
   const abs = safeJoin(root, rel);
   if (!abs) return { ok: false, error: 'path escapes root' };
+  if (Buffer.byteLength(content, 'utf8') > MAX_WRITE_BYTES) {
+    return { ok: false, error: `content too large (max ${MAX_WRITE_BYTES / 1024 / 1024} MB)` };
+  }
   try {
     await writeFile(abs, content, 'utf8');
     return { ok: true, path: abs };

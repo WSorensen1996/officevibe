@@ -17,10 +17,96 @@ import {
   isTaskUnread
 } from './tasks/taskShared';
 
+/** Subtle keycap hint, same kbd-chip pattern as the 'add task' ⌘⏎ hint in
+ *  TasksKanban (0cgs) — geometry matches; colors are tuned for the light panel
+ *  header (muted ink on cream, like SettingsTab's Kbd). Shown next to the × close
+ *  button as a visible cue that Esc closes the panel (TaskDetailPanel keydown). */
+function KbdHint({ children }: { children: React.ReactNode }) {
+  return (
+    <span style={{
+      flexShrink: 0, padding: '1px 4px',
+      fontFamily: 'var(--cth-font-mono, monospace)',
+      fontSize: 9, lineHeight: '12px', letterSpacing: '0.04em',
+      color: 'var(--cth-ink-500)',
+      background: 'var(--cth-cream-100)',
+      boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+      whiteSpace: 'nowrap'
+    }}>{children}</span>
+  );
+}
+
 /** The agent update history (display-only). Shared by the read view and the edit
  *  view so the full progress log is visible however the card was opened. Renders
  *  every update at full length (Markdown) with its kind, author, and timestamp. */
 type Update = { kind: keyof typeof UPDATE_COLOR; by?: string; ts?: string; text: string };
+
+/** True when an update is long enough to be worth folding (≈ more than the 3
+ *  clamped lines, or a single very long line). Short updates render in full with
+ *  no toggle. Agents 'lead with the answer', so the first 2-3 lines ARE the gist. */
+function updateNeedsFold(text: string): boolean {
+  return text.split('\n').length > 3 || text.length > 180;
+}
+
+/** One update card. Long updates clamp to ~3 lines by default with a subtle
+ *  '▸ more' / '▾ less' fold-out underneath; each card owns its own expand state
+ *  so opening one doesn't expand the rest. CSS line-clamp keeps the Markdown
+ *  rendering intact (no plain-text truncation). */
+function TaskUpdateRow({ u, nameFor, onNewTaskFromUpdate }: {
+  u: Update;
+  nameFor: (id?: string) => string | undefined;
+  onNewTaskFromUpdate?: (u: Update) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const foldable = updateNeedsFold(u.text);
+  const clamped = foldable && !expanded;
+  return (
+    <div style={{
+      marginBottom: 10, padding: 8,
+      background: 'var(--cth-paper-100)', boxShadow: `inset 0 0 0 1px ${UPDATE_COLOR[u.kind]}`
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+        <span style={{
+          fontFamily: 'var(--cth-font-display)', fontSize: 8, textTransform: 'uppercase',
+          color: UPDATE_COLOR[u.kind]
+        }}>{u.kind}</span>
+        <span style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
+          {nameFor(u.by) ?? u.by}
+          {u.ts ? ` · ${new Date(u.ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : ''}
+        </span>
+        {onNewTaskFromUpdate && (
+          <button
+            onClick={() => onNewTaskFromUpdate(u)}
+            title="New task from this update"
+            style={{
+              marginLeft: 'auto', flexShrink: 0,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              padding: '2px 5px 1px', border: 'none', cursor: 'pointer',
+              background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+              color: 'var(--cth-ink-700)'
+            }}
+          ><Icon name="plus" /></button>
+        )}
+      </div>
+      <div style={clamped ? {
+        display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden'
+      } : undefined}>
+        <Markdown>{u.text}</Markdown>
+      </div>
+      {foldable && (
+        <button
+          onClick={() => setExpanded((e) => !e)}
+          title={expanded ? 'Collapse' : 'Show full update'}
+          style={{
+            marginTop: 4, padding: '1px 2px', border: 'none', cursor: 'pointer',
+            background: 'none', color: 'var(--cth-ink-500)',
+            fontFamily: 'var(--cth-font-display)', fontSize: 9, textTransform: 'uppercase',
+            letterSpacing: '0.04em'
+          }}
+        >{expanded ? '▾ less' : '▸ more'}</button>
+      )}
+    </div>
+  );
+}
 
 function TaskUpdates({ updates, nameFor, onNewTaskFromUpdate }: {
   updates: Update[];
@@ -32,35 +118,7 @@ function TaskUpdates({ updates, nameFor, onNewTaskFromUpdate }: {
     <Section title={`UPDATES (${updates.length})`}>
       {updates.length === 0 && <Muted>No updates yet.</Muted>}
       {updates.map((u, i) => (
-        <div key={i} style={{
-          marginBottom: 10, padding: 8,
-          background: 'var(--cth-paper-100)', boxShadow: `inset 0 0 0 1px ${UPDATE_COLOR[u.kind]}`
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-            <span style={{
-              fontFamily: 'var(--cth-font-display)', fontSize: 8, textTransform: 'uppercase',
-              color: UPDATE_COLOR[u.kind]
-            }}>{u.kind}</span>
-            <span style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
-              {nameFor(u.by) ?? u.by}
-              {u.ts ? ` · ${new Date(u.ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : ''}
-            </span>
-            {onNewTaskFromUpdate && (
-              <button
-                onClick={() => onNewTaskFromUpdate(u)}
-                title="New task from this update"
-                style={{
-                  marginLeft: 'auto', flexShrink: 0,
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  padding: '2px 5px 1px', border: 'none', cursor: 'pointer',
-                  background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
-                  color: 'var(--cth-ink-700)'
-                }}
-              ><Icon name="plus" /></button>
-            )}
-          </div>
-          <Markdown>{u.text}</Markdown>
-        </div>
+        <TaskUpdateRow key={i} u={u} nameFor={nameFor} onNewTaskFromUpdate={onNewTaskFromUpdate} />
       ))}
     </Section>
   );
@@ -235,6 +293,7 @@ export function TaskDetailPanel() {
             flex: 1, minWidth: 0, margin: 0,
             fontFamily: 'var(--cth-font-display)', fontSize: 12, color: 'var(--cth-ink-900)'
           }}>NEW TASK</h1>
+          <KbdHint>esc</KbdHint>
           <button
             onClick={() => openTask(null)}
             title="Close (esc)"
@@ -306,6 +365,7 @@ export function TaskDetailPanel() {
             fontFamily: 'var(--cth-font-ui)', fontSize: 17, lineHeight: '22px',
             color: 'var(--cth-ink-900)', wordBreak: 'break-word'
           }}>{task.title}</h1>
+          <KbdHint>esc</KbdHint>
           <button
             onClick={() => openTask(null)}
             title="Close (esc)"
