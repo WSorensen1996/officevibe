@@ -50,6 +50,15 @@ export interface TaskUpdate {
   text: string;
 }
 
+/** A file/image the human attached to a task. Binary lives on disk under
+ *  `<projectRoot>/attachments/<taskId>/`; only this reference persists in
+ *  tasks.json. `path` is relative to the project root. */
+export interface TaskAttachment {
+  name: string;
+  path: string;
+  kind: 'image' | 'file';
+}
+
 /** A card on the task kanban, persisted to hive/tasks.json. */
 export interface ProjectTask {
   id: string;
@@ -72,6 +81,8 @@ export interface ProjectTask {
   /** ISO of the last time the human opened this card — drives the unread indicator.
    *  Renderer-owned; round-trips via the writeTasks `...t` spread. */
   viewedAt?: string;
+  /** Files/images the human pasted or attached (binary on disk, refs only here). */
+  attachments?: TaskAttachment[];
 }
 
 /** A message the router just delivered, with its resolved recipient ids. Drives
@@ -347,6 +358,17 @@ const api = {
   writeFile: (root: string, rel: string, content: string): Promise<
     { ok: true; path: string } | { ok: false; error: string }
   > => ipcRenderer.invoke('fs:writeFile', root, rel, content),
+
+  // ─── Task attachments (binary, under <projectRoot>/attachments/<taskId>) ──────
+  /** Write a base64-encoded file as a task attachment. The main process resolves
+   *  the project root + sanitizes the names; returns the stored relative path. */
+  attachmentWrite: (taskId: string, fileName: string, base64: string): Promise<
+    { ok: true; rel: string; name: string } | { ok: false; error: string }
+  > => ipcRenderer.invoke('attachment:write', taskId, fileName, base64),
+  /** Read an attachment (by its relative path) back as a data: URL for display. */
+  attachmentRead: (rel: string): Promise<
+    { ok: true; dataUrl: string; size: number } | { ok: false; error: string }
+  > => ipcRenderer.invoke('attachment:read', rel),
 
   // ─── Project store (multi-agent coordination) ────────────────────────────
   projectRegistry: (): Promise<ProjectRegistry> => ipcRenderer.invoke('project:registry'),

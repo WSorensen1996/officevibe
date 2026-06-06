@@ -40,6 +40,8 @@ interface TasksStore {
   deleteTask: (id: string) => void;
   moveTask: (id: string, status: Status) => void;
   archiveTask: (id: string) => void;
+  /** Archive every non-archived task in the `done` column in one write. */
+  archiveAllDone: () => void;
   unarchiveTask: (id: string) => void;
   markTaskRead: (id: string) => void;
   dispatchTask: (t: ProjectTask) => Promise<void>;
@@ -135,6 +137,19 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     const m = missions.find((x) => x.taskId === id);
     if (m) persistMissions(missions.filter((x) => x.id !== m.id));
     persist(tasks.map((t) => (t.id === id ? { ...t, archived: true } : t)));
+  },
+
+  // Bulk-archive the whole Done column in ONE write (vs N racing single archives):
+  // collect the non-archived done ids, drop their linked schedules, then persist
+  // the array with all of them flagged. Status is left untouched so a later
+  // restore returns each to the Done column.
+  archiveAllDone: () => {
+    const { tasks, missions, persist, persistMissions } = get();
+    const doneIds = new Set(tasks.filter((t) => t.status === 'done' && !t.archived).map((t) => t.id));
+    if (doneIds.size === 0) return;
+    const remaining = missions.filter((m) => !(m.taskId && doneIds.has(m.taskId)));
+    if (remaining.length !== missions.length) persistMissions(remaining);
+    persist(tasks.map((t) => (doneIds.has(t.id) ? { ...t, archived: true } : t)));
   },
 
   unarchiveTask: (id) => {
@@ -244,6 +259,7 @@ export function useTasks() {
     deleteTask: s.deleteTask,
     moveTask: s.moveTask,
     archiveTask: s.archiveTask,
+    archiveAllDone: s.archiveAllDone,
     unarchiveTask: s.unarchiveTask,
     markTaskRead: s.markTaskRead,
     dispatchTask: s.dispatchTask

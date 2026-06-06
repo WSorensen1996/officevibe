@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Icon } from './Icon';
 import { useDictation } from '@/hooks/useDictation';
 
@@ -16,13 +17,30 @@ export function MicButton({ onTranscript }: MicButtonProps) {
   const recording = state === 'recording';
   const busy = state === 'transcribing';
 
+  // Keyboard shortcut: ⌘/Ctrl+Shift+M starts/stops recording (mirrors tapping the
+  // button) so you can dictate without reaching for the mouse. The modifiers mean
+  // it never types a character, so it's safe to fire even while the target textarea
+  // is focused — that's exactly when you'd dictate into it. Ignored mid-transcribe
+  // (matches the button's disabled state). Assumes a single mounted MicButton (the
+  // new-task form is the only place it's used today).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'm' || e.key === 'M')) {
+        e.preventDefault();
+        if (state !== 'transcribing') toggle();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [toggle, state]);
+
   const title = error
     ? `Speech-to-text error: ${error}`
     : recording
-    ? 'Stop & transcribe'
+    ? 'Stop & transcribe (⌘/Ctrl+Shift+M)'
     : busy
     ? 'Transcribing…'
-    : 'Dictate — speak instead of typing';
+    : 'Dictate — speak instead of typing (⌘/Ctrl+Shift+M)';
 
   // A short hint shown beside the button so state/errors are visible without DevTools.
   const hint = error ? error : recording ? 'recording…' : busy ? 'transcribing…' : '';

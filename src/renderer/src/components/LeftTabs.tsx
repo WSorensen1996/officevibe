@@ -6,9 +6,7 @@ const TABS: { key: LeftTab; label: string; icon: IconName }[] = [
   { key: 'office',   label: 'office',   icon: 'mcp' },
   { key: 'messages', label: 'messages', icon: 'bell' },
   { key: 'terminal', label: 'terminal', icon: 'terminal' },
-  { key: 'browser',  label: 'browser',  icon: 'web' },
-  { key: 'files',    label: 'files',    icon: 'folder' },
-  { key: 'logs',     label: 'logs',     icon: 'code' }
+  { key: 'browser',  label: 'browser',  icon: 'web' }
 ];
 
 export interface LeftTabsProps {
@@ -20,7 +18,7 @@ export interface LeftTabsProps {
    *  for your input (a permission prompt / question surfaced in its messages tab). */
   messagesNeedsYou?: boolean;
   /** Accent of the currently-selected agent — colors the active underline on the
-   *  agent tabs (terminal/files/messages/logs) so it reads as "this agent". The
+   *  agent tabs (terminal/messages) so it reads as "this agent". The
    *  shared office/browser tabs keep the neutral sky accent. */
   accent?: AccentColorName;
   /** A task's full card is open — append a transient TASK tab to the bar. It
@@ -30,7 +28,7 @@ export interface LeftTabsProps {
 
 /**
  * The left-column tab bar. Office and Browser are shared views; the agent tabs
- * (messages/terminal/files/logs) render the selected agent's content. Messages
+ * (messages/terminal) render the selected agent's content. Messages
  * sits 2nd (right after Office) so the agent's running chat — what it says while
  * working, interleaved with its mail — is one click away. A pulsing dot appears on
  * the Browser tab while Michael is browsing and you're looking at another tab.

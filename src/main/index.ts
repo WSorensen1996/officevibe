@@ -9,7 +9,7 @@ import {
   slugify, projectFolderName, defaultProjectsDir, deriveProjectName, upsertProject,
   type HarnessConfig, type ScheduledMission, type ProjectRef
 } from './config';
-import { listDir, readFileText, writeFileText } from './fs';
+import { listDir, readFileText, writeFileText, writeFileBinary, readFileBinary } from './fs';
 import {
   getBranch, isRepo, addWorktree, removeWorktree
 } from './git';
@@ -865,6 +865,27 @@ ipcMain.handle('fs:writeFile', (_evt, root: unknown, rel: unknown, content: unkn
     return { ok: false, error: 'invalid args' };
   }
   return writeFileText(root, rel, content);
+});
+
+// ─── IPC: task attachments (binary, under <projectRoot>/attachments/<taskId>) ─
+// The main process owns the project root (renderer never sees it) and sanitizes
+// the task id + filename before they hit the sandboxed safeJoin in fs.ts.
+ipcMain.handle('attachment:write', (_evt, taskId: unknown, fileName: unknown, base64: unknown) => {
+  if (typeof taskId !== 'string' || typeof fileName !== 'string' || typeof base64 !== 'string') {
+    return { ok: false, error: 'invalid args' };
+  }
+  const root = readConfig().activeProjectPath;
+  if (!root) return { ok: false, error: 'no active project' };
+  const safeTask = taskId.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80) || 'task';
+  const safeName = fileName.replace(/[^a-zA-Z0-9._ -]/g, '_').replace(/^\.+/, '').slice(0, 120) || 'file';
+  const rel = `attachments/${safeTask}/${safeName}`;
+  return writeFileBinary(root, rel, base64).then((res) => (res.ok ? { ok: true, rel, name: safeName } : res));
+});
+ipcMain.handle('attachment:read', (_evt, rel: unknown) => {
+  if (typeof rel !== 'string') return { ok: false, error: 'invalid args' };
+  const root = readConfig().activeProjectPath;
+  if (!root) return { ok: false, error: 'no active project' };
+  return readFileBinary(root, rel);
 });
 
 // ─── IPC: project store (multi-agent coordination) ──────────────────────────

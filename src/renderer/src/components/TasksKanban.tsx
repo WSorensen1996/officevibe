@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { PixelBadge } from './PixelBadge';
@@ -9,6 +9,7 @@ import { useTasks } from '@/hooks/useTasks';
 import {
   type ProjectTask,
   type TaskUpdate,
+  type TaskAttachment,
   type Status,
   type ScheduledMission,
   type ScheduleSpec,
@@ -44,6 +45,7 @@ export function TasksKanban() {
     deleteTask,
     moveTask,
     archiveTask,
+    archiveAllDone,
     unarchiveTask,
     dispatchTask
   } = useTasks();
@@ -109,6 +111,23 @@ export function TasksKanban() {
                   >{unread}</span>
                 )}
                 <span style={{ marginLeft: unread > 0 ? 4 : 'auto', fontSize: 11, fontFamily: 'var(--cth-font-ui)' }}>{cards.length}</span>
+                {/* Archive-all: clears the whole Done column in one write (restorable
+                    from the ARCHIVED section). Only on Done, only when it has cards. */}
+                {col.key === 'done' && cards.length > 0 && (
+                  <button
+                    onClick={archiveAllDone}
+                    title="Archive all done tasks (restorable from the ARCHIVED section)"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 4,
+                      padding: '1px 6px 0', border: 'none', cursor: 'pointer',
+                      background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+                      fontFamily: 'var(--cth-font-display)', fontSize: 8, textTransform: 'uppercase',
+                      color: 'var(--cth-ink-900)'
+                    }}
+                  >
+                    <Icon name="folder" /> archive all
+                  </button>
+                )}
               </div>
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {cards.length === 0 && (
@@ -396,6 +415,88 @@ export function PriorityDots({ level }: { level: number }) {
   );
 }
 
+// ─── Attachments ─────────────────────────────────────────────────────────────
+
+/** Read a File as base64 (strip the data: URL prefix) for the attachment IPC. */
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const res = reader.result;
+      resolve(typeof res === 'string' ? res.slice(res.indexOf(',') + 1) : '');
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('read failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** One attachment tile: image attachments load their bytes lazily (via the
+ *  attachment:read IPC → data URL) and render as a thumbnail; non-images show a
+ *  filename chip. Each carries a remove (×) button when `onRemove` is given. */
+function AttachmentTile({ att, onRemove }: { att: TaskAttachment; onRemove?: () => void }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    if (att.kind !== 'image') return;
+    let alive = true;
+    window.cth.attachmentRead(att.path)
+      .then((r) => { if (alive) { if (r.ok) setUrl(r.dataUrl); else setErr(r.error); } })
+      .catch((e) => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
+    return () => { alive = false; };
+  }, [att.path, att.kind]);
+
+  const remove = onRemove && (
+    <button
+      type="button"
+      onClick={onRemove}
+      title="Remove attachment"
+      style={{
+        position: 'absolute', top: -6, right: -6, width: 16, height: 16, padding: 0,
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        border: 'none', cursor: 'pointer', borderRadius: 0,
+        background: 'var(--cth-coral)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
+        color: 'var(--cth-ink-900)', fontSize: 10, lineHeight: '10px', fontWeight: 700
+      }}
+    >×</button>
+  );
+
+  if (att.kind === 'image') {
+    return (
+      <span style={{ position: 'relative', display: 'inline-flex' }}>
+        <span
+          title={att.name}
+          style={{
+            width: 64, height: 64, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            overflow: 'hidden', background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)'
+          }}
+        >
+          {url
+            ? <img src={url} alt={att.name} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+            : <span style={{ fontSize: 9, color: 'var(--cth-ink-300)', padding: 2, textAlign: 'center' }}>{err ? 'error' : '…'}</span>}
+        </span>
+        {remove}
+      </span>
+    );
+  }
+  return (
+    <span style={{ position: 'relative', display: 'inline-flex' }}>
+      <span
+        title={att.name}
+        style={{
+          maxWidth: 170, display: 'inline-flex', alignItems: 'center', gap: 4,
+          padding: '4px 8px', overflow: 'hidden', whiteSpace: 'nowrap',
+          background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+          fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-900)'
+        }}
+      >
+        <Icon name="folder" />
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.name}</span>
+      </span>
+      {remove}
+    </span>
+  );
+}
+
 // ─── Add-task form ─────────────────────────────────────────────────────────--
 
 export function AddTaskForm({ agents, existing, initial, seed, initialMission, onCancel, onSubmit, onCreateAndDispatch, onDelete, onArchive, onDispatch }: {
@@ -419,11 +520,19 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   onDispatch?: () => void;
 }) {
   const editing = !!initial;
-  const [title, setTitle] = useState(initial?.title ?? '');
-  const [description, setDescription] = useState(initial?.description ?? seed?.description ?? '');
-  const [assignee, setAssignee] = useState(initial?.assignee ?? '');
-  const [priority, setPriority] = useState(initial?.priority ?? 3);
-  const [deps, setDeps] = useState<string[]>(initial?.dependsOn ?? seed?.dependsOn ?? []);
+  // CREATE-mode draft persistence: the `task` left tab is conditionally mounted
+  // (App.tsx), so flipping to another tab and back unmounts/remounts this form and
+  // would drop what was typed. We read the persisted draft ONCE at mount (a lazy
+  // initializer, non-reactive so typing never re-seeds) and mirror changes back to
+  // the store below. Edit mode never touches the draft (its fields come from the
+  // task being edited). See store `TaskDraft` / `openTask`.
+  const setTaskDraft = useStore((s) => s.setTaskDraft);
+  const [draft0] = useState(() => (initial ? null : useStore.getState().taskDraft));
+  const [title, setTitle] = useState(initial?.title ?? draft0?.title ?? '');
+  const [description, setDescription] = useState(initial?.description ?? draft0?.description ?? seed?.description ?? '');
+  const [assignee, setAssignee] = useState(initial?.assignee ?? draft0?.assignee ?? '');
+  const [priority, setPriority] = useState(initial?.priority ?? draft0?.priority ?? 3);
+  const [deps, setDeps] = useState<string[]>(initial?.dependsOn ?? draft0?.deps ?? seed?.dependsOn ?? []);
   const [status, setStatus] = useState<Status>(initial?.status ?? 'todo');
   const [confirmDelete, setConfirmDelete] = useState(false);
   // Dispatch is offered only for not-yet-running tasks (mirrors the board card),
@@ -451,6 +560,55 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   const [preEnrich, setPreEnrich] = useState<string | null>(null);
   const [enrichError, setEnrichError] = useState<string | null>(null);
 
+  // Attachments: pasted images + attached files. A CREATE-mode draft mints a
+  // stable id ONCE (lazy initializer, restored from the draft on a tab-flick
+  // remount) so files written to `attachments/<id>/` land in the folder the task
+  // is ultimately saved with. Edit mode reuses the real task id.
+  const [createId] = useState(() => draft0?.id ?? shortId());
+  const attachTaskId = initial?.id ?? createId;
+  const [attachments, setAttachments] = useState<TaskAttachment[]>(
+    initial?.attachments ?? draft0?.attachments ?? []
+  );
+  const [attaching, setAttaching] = useState(false);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Persist each dropped/pasted/picked file to disk and append its reference.
+  // The on-disk name is uniquified (pasted images often share "image.png") while
+  // the displayed name keeps the original.
+  const addFiles = useCallback(async (files: File[]) => {
+    const list = files.filter((f) => f && f.size > 0);
+    if (!list.length) return;
+    setAttaching(true);
+    setAttachError(null);
+    try {
+      for (const file of list) {
+        try {
+          const b64 = await fileToBase64(file);
+          const isImg = file.type.startsWith('image/');
+          const extMatch = file.name.match(/\.[a-z0-9]+$/i);
+          const ext = extMatch ? extMatch[0] : (isImg ? `.${(file.type.split('/')[1] || 'png')}` : '');
+          const uniq = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}${ext}`;
+          const res = await window.cth.attachmentWrite(attachTaskId, uniq, b64);
+          if (res.ok) {
+            const att: TaskAttachment = { name: file.name || uniq, path: res.rel, kind: isImg ? 'image' : 'file' };
+            setAttachments((prev) => [...prev, att]);
+          } else {
+            setAttachError(res.error);
+          }
+        } catch (e) {
+          setAttachError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    } finally {
+      setAttaching(false);
+    }
+  }, [attachTaskId]);
+
+  const removeAttachment = (path: string) =>
+    setAttachments((prev) => prev.filter((a) => a.path !== path));
+
   // Programmatic setDescription() (enrich/undo/dictation) updates the controlled
   // textarea's value, but the new text isn't *painted* until the user interacts:
   // the Pixi WebGL canvas (scene/office) runs a continuous ticker on its own
@@ -470,7 +628,7 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   // Deliberately omit `updates`/`statusUpdatedAt` — the form never carries
   // agent-owned data; the main-process writeTasks merge restores them from disk.
   const buildTask = (): ProjectTask => ({
-    id: initial?.id ?? shortId(),
+    id: attachTaskId,
     title: title.trim(),
     description: description.trim() || undefined,
     assignee: assignee || undefined,
@@ -479,7 +637,8 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
     priority,
     createdAt: initial?.createdAt ?? new Date().toISOString(),
     // Carry the archive flag through an edit so saving the form can't un-archive.
-    archived: initial?.archived
+    archived: initial?.archived,
+    attachments: attachments.length ? attachments : undefined
   });
 
   const buildSchedule = (): ScheduleSpec => {
@@ -494,9 +653,25 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
     return { mode: 'none' };
   };
 
+  // Mirror the live CREATE-mode draft into the store on every change so it survives
+  // a left-tab switch (read back by `draft0` on remount). No-op while editing.
+  useEffect(() => {
+    if (editing) return;
+    setTaskDraft({ title, description, assignee, priority, deps, id: createId, attachments });
+  }, [editing, setTaskDraft, title, description, assignee, priority, deps, createId, attachments]);
+
   const submit = () => {
     if (!title.trim()) return;
     onSubmit(buildTask(), buildSchedule());
+  };
+
+  // Keyboard submit. In CREATE mode "create & dispatch" is the primary action
+  // (Enter in the title, or ⌘/Ctrl+Enter anywhere in the form); EDIT mode has no
+  // dispatch-on-create, so it falls back to saving.
+  const submitPrimary = () => {
+    if (!title.trim() || enriching) return;
+    if (!editing && onCreateAndDispatch) onCreateAndDispatch(buildTask(), buildSchedule());
+    else submit();
   };
 
   // Send the task intent (title + description) to the headless assistant and
@@ -541,13 +716,48 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   };
 
   return (
-    <div style={{ padding: '0 10px 8px', flexShrink: 0 }}>
+    <div
+      style={{
+        padding: '0 10px 8px', flexShrink: 0,
+        // Highlight the whole form as a drop target while dragging files over it.
+        outline: dragOver ? '2px dashed var(--cth-sky)' : 'none', outlineOffset: -2
+      }}
+      // ⌘/Ctrl+Enter from ANY field (incl. the description textarea, where plain
+      // Enter must stay a newline) creates & dispatches. The title's own handler
+      // ignores modifier+Enter, so it bubbles here and fires exactly once.
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitPrimary(); }
+      }}
+      // Drag-drop files anywhere onto the form to attach them.
+      onDragOver={(e) => {
+        if (Array.from(e.dataTransfer?.types ?? []).includes('Files')) {
+          e.preventDefault();
+          if (!dragOver) setDragOver(true);
+        }
+      }}
+      onDragLeave={(e) => { if (e.currentTarget === e.target) setDragOver(false); }}
+      onDrop={(e) => {
+        const files = Array.from(e.dataTransfer?.files ?? []);
+        if (!files.length) return;
+        e.preventDefault();
+        setDragOver(false);
+        void addFiles(files);
+      }}
+    >
       <PixelPanel variant="inset" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <input
           autoFocus
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit(); }}
+          // Plain Enter in the single-line title creates & dispatches the task
+          // (the requested shortcut). Modifier+Enter is left to the form-level
+          // handler above so it works from the textarea too.
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+              e.preventDefault();
+              submitPrimary();
+            }
+          }}
           placeholder="Task title…"
           style={inputStyle}
         />
@@ -558,8 +768,19 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
             // Manually editing the enriched text retires the undo — restoring an
             // ambiguous "previous" version would be surprising after hand-edits.
             onChange={(e) => { setDescription(e.target.value); if (preEnrich !== null) setPreEnrich(null); }}
+            // Paste an image from the clipboard to attach it. Only intercept when
+            // the clipboard actually holds image files — plain text paste flows
+            // through to the textarea untouched.
+            onPaste={(e) => {
+              const imgs = Array.from(e.clipboardData?.items ?? [])
+                .filter((it) => it.kind === 'file' && it.type.startsWith('image/'));
+              if (!imgs.length) return;
+              e.preventDefault();
+              const files = imgs.map((it) => it.getAsFile()).filter((f): f is File => !!f);
+              void addFiles(files);
+            }}
             rows={5}
-            placeholder="Description / context (optional)"
+            placeholder="Description / context (optional) — paste or drop images here"
             style={{ ...inputStyle, flex: 1, resize: 'vertical', fontFamily: 'var(--cth-font-mono)' }}
           />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'stretch', flexShrink: 0 }}>
@@ -599,10 +820,50 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
                 }}
               >undo</button>
             )}
+            {/* Attach files via a hidden picker (paste/drag also work). */}
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={attaching}
+              title="Attach files — or paste an image / drop files onto the form"
+              style={{
+                height: 30, padding: '0 8px',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                border: 'none', cursor: attaching ? 'progress' : 'pointer',
+                background: 'var(--cth-cream-100)', color: 'var(--cth-ink-900)',
+                boxShadow: 'inset 0 0 0 2px var(--cth-ink-700), 0 2px 0 var(--cth-ink-700)',
+                fontFamily: 'var(--cth-font-ui)', fontSize: 13
+              }}
+            >
+              <Icon name="folder" /> {attaching ? 'saving…' : 'attach'}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                void addFiles(Array.from(e.target.files ?? []));
+                e.target.value = ''; // allow re-picking the same file
+              }}
+            />
           </div>
         </div>
         {enrichError && (
           <div style={{ fontSize: 11, lineHeight: '14px', color: 'var(--cth-coral)' }}>{enrichError}</div>
+        )}
+        {attachError && (
+          <div style={{ fontSize: 11, lineHeight: '14px', color: 'var(--cth-coral)' }}>attach failed: {attachError}</div>
+        )}
+        {attachments.length > 0 && (
+          <div>
+            <div style={{ ...labelStyle, marginBottom: 4 }}>attachments ({attachments.length})</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start' }}>
+              {attachments.map((att) => (
+                <AttachmentTile key={att.path} att={att} onRemove={() => removeAttachment(att.path)} />
+              ))}
+            </div>
+          </div>
         )}
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
           <label style={labelStyle}>assignee</label>
@@ -628,7 +889,30 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
 
         {existing.length > 0 && (
           <div>
-            <div style={{ ...labelStyle, marginBottom: 4 }}>depends on</div>
+            {/* Dependencies are OPT-IN: a fresh task starts with NONE selected (deps
+                init is `[] `). This box lists existing tasks as togglable chips —
+                a dimmed `+` chip is an AVAILABLE option (not a dependency), a bold
+                `✓` sky chip is a SELECTED dependency. The count + "clear" make it
+                unambiguous that nothing is depended-on until you tap it. */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <span style={labelStyle}>depends on{deps.length > 0 ? ` (${deps.length})` : ''}</span>
+              {deps.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setDeps([])}
+                  title="Clear all dependencies"
+                  style={{
+                    padding: '1px 7px 0', border: 'none', cursor: 'pointer',
+                    background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+                    fontFamily: 'var(--cth-font-display)', fontSize: 8, textTransform: 'uppercase',
+                    color: 'var(--cth-ink-700)'
+                  }}
+                >clear</button>
+              )}
+              <span style={{ fontSize: 10, color: 'var(--cth-ink-300)' }}>
+                {deps.length === 0 ? 'none — tap a task to add' : 'tap to toggle'}
+              </span>
+            </div>
             <div style={{
               display: 'flex', flexWrap: 'wrap', gap: 4, maxHeight: 84, overflowY: 'auto',
               padding: 4, background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
@@ -638,16 +922,23 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
                 return (
                   <button
                     key={t.id}
+                    type="button"
                     onClick={() => toggleDep(t.id)}
-                    title={t.title}
+                    title={on ? `Remove dependency: ${t.title}` : `Add dependency: ${t.title}`}
                     style={{
-                      maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      maxWidth: 170, overflow: 'hidden', whiteSpace: 'nowrap',
                       padding: '2px 7px 1px', border: 'none', cursor: 'pointer',
                       background: on ? 'var(--cth-sky)' : 'var(--cth-cream-200)',
                       boxShadow: `inset 0 0 0 1px ${on ? 'var(--cth-ink-900)' : 'var(--cth-ink-300)'}`,
-                      fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-900)'
+                      fontFamily: 'var(--cth-font-ui)', fontSize: 11,
+                      color: on ? 'var(--cth-ink-900)' : 'var(--cth-ink-500)',
+                      opacity: on ? 1 : 0.7, fontWeight: on ? 700 : 400
                     }}
-                  >{t.title}</button>
+                  >
+                    <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 9, flexShrink: 0 }}>{on ? '✓' : '+'}</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span>
+                  </button>
                 );
               })}
             </div>

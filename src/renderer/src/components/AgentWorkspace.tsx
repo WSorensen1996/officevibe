@@ -6,9 +6,7 @@ import { SpritePortrait } from './SpritePortrait';
 import { PtyTerminalView } from './PtyTerminalView';
 import { MessageQueueComposer } from './MessageQueueComposer';
 import { AssistantRoleNote } from './AssistantRoleNote';
-import { FilesTab } from './FilesTab';
 import { ThreadsPanel } from './ThreadsPanel';
-import { LogsTab } from './LogsTab';
 import { Icon } from './Icon';
 import { disposeTerminal } from './terminalPool';
 import { useStore, type Agent, type LeftTab } from '@/store/store';
@@ -180,12 +178,8 @@ export function AgentWorkspace({ agent, tab }: AgentWorkspaceProps) {
               This agent has no live terminal. Spawn an agent through "add agent" to use the terminal tab.
             </EmptyTab>
           )
-        ) : tab === 'files' ? (
-          <FilesTab cwd={agent.cwd} />
         ) : tab === 'messages' ? (
           <ThreadsPanel agentId={agent.id} agentName={agent.name} accent={agent.accent} />
-        ) : tab === 'logs' ? (
-          <LogsTab agentId={agent.id} />
         ) : null}
       </div>
     </PixelPanel>

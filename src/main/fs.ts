@@ -1,5 +1,5 @@
-import { readdir, readFile, writeFile, stat } from 'node:fs/promises';
-import { isAbsolute, join, normalize, relative, resolve } from 'node:path';
+import { mkdir, readdir, readFile, writeFile, stat } from 'node:fs/promises';
+import { dirname, isAbsolute, join, normalize, relative, resolve } from 'node:path';
 
 /**
  * Confines `path` inside `root` to prevent path-traversal escapes.
@@ -74,6 +74,60 @@ export async function writeFileText(root: string, rel: string, content: string):
   try {
     await writeFile(abs, content, 'utf8');
     return { ok: true, path: abs };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// Generous cap for pasted images / attachments (the text path stays at 2 MB).
+const MAX_ATTACH_BYTES = 25 * 1024 * 1024; // 25 MB
+
+/** Write a base64-decoded buffer under `root`, creating parent dirs as needed.
+ *  The binary sibling of writeFileText — used for task attachments (text-only
+ *  writeFileText can't hold image bytes). */
+export async function writeFileBinary(root: string, rel: string, base64: string): Promise<{
+  ok: true; path: string;
+} | { ok: false; error: string }> {
+  const abs = safeJoin(root, rel);
+  if (!abs) return { ok: false, error: 'path escapes root' };
+  try {
+    const buf = Buffer.from(base64, 'base64');
+    if (buf.length > MAX_ATTACH_BYTES) {
+      return { ok: false, error: `file too large (${(buf.length / 1024 / 1024).toFixed(1)} MB, max 25 MB)` };
+    }
+    await mkdir(dirname(abs), { recursive: true });
+    await writeFile(abs, buf);
+    return { ok: true, path: abs };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+const MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', avif: 'image/avif',
+  pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', json: 'application/json',
+  csv: 'text/csv', zip: 'application/zip'
+};
+
+/** Read a file under `root` and return it as a data: URL (mime guessed from the
+ *  extension). The binary counterpart of readFileText — lets the renderer show
+ *  attachment thumbnails without ever handling a file:// path. */
+export async function readFileBinary(root: string, rel: string): Promise<{
+  ok: true; dataUrl: string; size: number;
+} | { ok: false; error: string }> {
+  const abs = safeJoin(root, rel);
+  if (!abs) return { ok: false, error: 'path escapes root' };
+  try {
+    const s = await stat(abs);
+    if (s.size > MAX_ATTACH_BYTES) {
+      return { ok: false, error: `file too large (${(s.size / 1024 / 1024).toFixed(1)} MB)` };
+    }
+    const buf = await readFile(abs);
+    const dot = abs.lastIndexOf('.');
+    const ext = dot >= 0 ? abs.slice(dot + 1).toLowerCase() : '';
+    const mime = MIME_BY_EXT[ext] ?? 'application/octet-stream';
+    return { ok: true, dataUrl: `data:${mime};base64,${buf.toString('base64')}`, size: s.size };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }

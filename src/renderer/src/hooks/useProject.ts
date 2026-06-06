@@ -222,6 +222,36 @@ export function useProject(config: HarnessConfig | null): void {
     return () => { cancelled = true; clearTimeout(t); };
   }, [config?.onboardingComplete, config?.activeProjectPath, godStatus]);
 
+  // 1c) Clear the boot/restore placeholder on agents that are alive but idle.
+  //     The spawn label ('starting up', AddAgentModal) and the restore label
+  //     ('reconnecting…', loadPersistedAgents) are only cleared by a hook event
+  //     (effect #2). An agent that booted but was never prompted — or a restored
+  //     agent whose live PTY reconnected — fires no hook and would sit on the
+  //     placeholder forever, reading as "stuck / not working" when it's actually
+  //     idle and ready. Reconcile against live PTYs and relabel: god has its own
+  //     bootstrap (effect #1), and we only touch IDLE agents on a PLACEHOLDER with
+  //     a LIVE pty — never a working/blocked agent or one whose pty is gone.
+  useEffect(() => {
+    if (!config?.onboardingComplete) return;
+    let cancelled = false;
+    const PLACEHOLDERS = new Set(['starting up', 'reconnecting…', 'restarting…']);
+    const tick = async () => {
+      const live = await window.cth.listPtys().catch(() => []);
+      if (cancelled) return;
+      const liveIds = new Set(live.map((p) => p.id));
+      const { agents, updateAgent } = useStore.getState();
+      for (const a of agents) {
+        if (a.isGod || !a.ptyId) continue;
+        if (a.status === 'idle' && PLACEHOLDERS.has(a.action) && liveIds.has(a.ptyId)) {
+          updateAgent(a.id, { action: a.isAssistant ? 'standing by' : 'idle' });
+        }
+      }
+    };
+    void tick();
+    const iv = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [config?.onboardingComplete]);
+
   // 2) Drive avatars from real hook events emitted by each agent's shim.
   useEffect(() => {
     const off = window.cth.onProjectHookEvent((e) => {

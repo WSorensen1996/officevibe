@@ -11,6 +11,17 @@ export interface TaskUpdate {
   text: string;
 }
 
+/** A file or image the human attached to a task. The binary lives on disk under
+ *  `<projectRoot>/attachments/<taskId>/`; only this reference is stored in
+ *  tasks.json. `path` is RELATIVE to the project root (e.g.
+ *  `attachments/<taskId>/<file>`); written by the `attachment:write` IPC and read
+ *  back as a data: URL by `attachment:read` for thumbnails. */
+export interface TaskAttachment {
+  name: string;
+  path: string;
+  kind: 'image' | 'file';
+}
+
 /** A card on the task kanban. Mirrors ProjectTask in the main/preload process —
  *  re-declared locally so the renderer doesn't reach into the preload package
  *  (same convention as store/config.ts). Structurally compatible with
@@ -39,6 +50,10 @@ export interface ProjectTask {
    *  unread/"just finished" indicator: any update newer than this is unread.
    *  Round-trips via the writeTasks `...t` spread + the parseTasks whitelist. */
   viewedAt?: string;
+  /** Files/images the human pasted or attached. Binary lives on disk under
+   *  `attachments/<id>/`; only these references persist here. Load-bearing in
+   *  parseTasks's whitelist — drop it there and the 5s poll wipes attachments. */
+  attachments?: TaskAttachment[];
 }
 
 export type Status = ProjectTask['status'];
@@ -145,6 +160,17 @@ export function parseUpdates(raw: unknown): TaskUpdate[] | undefined {
   return out.length ? out.slice(-20) : undefined;
 }
 
+/** Keep only well-formed attachment references (name + rel path + image|file). */
+export function parseAttachments(raw: unknown): TaskAttachment[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw.filter((a): a is TaskAttachment =>
+    !!a && typeof a === 'object'
+    && typeof (a as TaskAttachment).name === 'string'
+    && typeof (a as TaskAttachment).path === 'string'
+    && ((a as TaskAttachment).kind === 'image' || (a as TaskAttachment).kind === 'file'));
+  return out.length ? out : undefined;
+}
+
 /** Whether a task has agent activity the human hasn't seen yet: it has at least
  *  one update whose timestamp is newer than the last time the card was opened
  *  (`viewedAt`). Covers "just finished" (a fresh `done` update) and any progress
@@ -200,6 +226,8 @@ export function parseTasks(raw: unknown): ProjectTask[] {
       // Load-bearing: drop this on poll and the next human persist() un-archives.
       archived: t.archived === true ? true : undefined,
       // Load-bearing: drop this on poll and the unread indicator never settles.
-      viewedAt: typeof t.viewedAt === 'string' ? t.viewedAt : undefined
+      viewedAt: typeof t.viewedAt === 'string' ? t.viewedAt : undefined,
+      // Load-bearing: drop this on poll and the next human persist() wipes attachments.
+      attachments: parseAttachments(t.attachments)
     }));
 }

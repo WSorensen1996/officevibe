@@ -618,6 +618,10 @@ export class ProjectManager {
     // Every agent owns a live browser (the built-in browser MCP server is granted
     // to all agents). Tell them how to use it and how the user watches it.
     const browserLine = 'You have your OWN live browser — use mcp__browser__* (browser_navigate / browser_snapshot / browser_click / browser_type / browser_read_text / browser_screenshot). Call browser_snapshot to get each clickable element\'s ref before clicking/typing. This is the live browser pane the user can watch: when you act, the bottom-left Browser pane auto-follows you (the user can also pin your tab to watch you). For plain text lookups WebSearch/WebFetch still work too.';
+    // Team-wide communication style: keep every human-facing output short, precise,
+    // and easy to understand. Applies to all agents (god/assistant/workers) since
+    // they all receive this injected prompt.
+    const styleLine = 'COMMUNICATION STYLE: lead with the answer. Keep every human-facing output — task-updates, messages, and your final replies — short, precise, and easy to understand: a one-line takeaway first, then only the detail that matters. Prefer plain language and tight bullets over long paragraphs; cut filler, preamble, and restating the question. Be brief without dropping anything important (and no need to label or announce that you are being brief).';
     return [
       `You are "${meta.name}" (${meta.id}), an autonomous agent in a collaborating team of Claude agents.`,
       `Your private workspace is ${dir}. The shared project is ${root}. Full protocol: ${root}/PROTOCOL.md.`,
@@ -632,6 +636,7 @@ export class ProjectManager {
       memoryLine,
       godLine,
       browserLine,
+      styleLine,
       `Env vars available to you: AGENT_ID, AGENT_NAME, PROJECT_ROOT, AGENT_DIR${knowledge ? ', KNOWLEDGE_DIR' : ''}.`
     ].filter(Boolean).join('\n');
   }

@@ -3,6 +3,7 @@ import type { AccentColorName } from '@/design/tokens';
 import type { OfficeCharacterName } from '@/scene/office/cast';
 import type { StatusKind } from '@/components/PixelBadge';
 import type { EffortLevel } from '@/store/config';
+import type { TaskAttachment } from '@/components/tasks/taskShared';
 
 export type ToolKind =
   | 'Read' | 'Edit' | 'Write' | 'Bash' | 'WebFetch' | 'WebSearch'
@@ -109,10 +110,10 @@ export interface QueuedMessage {
 }
 
 /** Which view fills the left column. `office` is the floor + memory overlay and
- *  `browser` is the shared native browser pane; the next four are the selected
- *  agent's workspace (its terminal, files, messages, and logs); `task` is the
+ *  `browser` is the shared native browser pane; the next two are the selected
+ *  agent's workspace (its terminal and messages); `task` is the
  *  transient full-card view opened from the Kanban board (see `openTaskId`). */
-export type LeftTab = 'office' | 'terminal' | 'browser' | 'files' | 'messages' | 'logs' | 'task';
+export type LeftTab = 'office' | 'terminal' | 'browser' | 'messages' | 'task';
 
 /** Sentinel `openTaskId` value meaning "the left task panel is in CREATE mode"
  *  (no real task yet). `shortId()` only ever emits `t-…` ids, so this can never
@@ -127,9 +128,30 @@ export interface NewTaskSeed {
   dependsOn?: string[];
 }
 
-/** The four left tabs that render the selected agent's workspace (vs the shared
+/** A persisted, in-progress CREATE-mode task draft. Lives in the store (not local
+ *  component state) so the new-task form survives a left-tab switch: the `task`
+ *  tab is conditionally mounted (App.tsx), so flipping to another tab unmounts the
+ *  form and would otherwise drop whatever was typed. Reset whenever a card is
+ *  started/opened/closed (see `openTask`); deliberately preserved across
+ *  `setLeftTab`. Not persisted to localStorage — a draft should outlive a tab
+ *  flick, not an app restart. */
+export interface TaskDraft {
+  title?: string;
+  description?: string;
+  assignee?: string;
+  priority?: number;
+  deps?: string[];
+  /** Stable id minted once for a CREATE-mode draft so attachments written to disk
+   *  under `attachments/<id>/` survive a tab-flick remount and match the id the
+   *  task is finally created with. */
+  id?: string;
+  /** Attachments added before the task is created (survive the same tab flick). */
+  attachments?: TaskAttachment[];
+}
+
+/** The left tabs that render the selected agent's workspace (vs the shared
  *  `office`/`browser` views). */
-export const AGENT_LEFT_TABS = ['terminal', 'files', 'messages', 'logs'] as const;
+export const AGENT_LEFT_TABS = ['terminal', 'messages'] as const;
 export function isAgentTab(tab: LeftTab): boolean {
   return (AGENT_LEFT_TABS as readonly string[]).includes(tab);
 }
@@ -164,6 +186,9 @@ interface State {
    *  full-card view closes OR the user opens any other card / a blank "add task"
    *  create, so it never leaks into a later unrelated create. Transient. */
   newTaskSeed: NewTaskSeed | null;
+  /** In-progress CREATE-mode task draft, persisted in the store so the new-task
+   *  form survives a left-tab switch (the `task` tab unmounts on switch). Transient. */
+  taskDraft: TaskDraft | null;
   /** The left tab that was active before a card was opened, so closing the
    *  full-card view returns the user where they were. Transient. */
   prevLeftTab: LeftTab;
@@ -224,6 +249,8 @@ interface State {
   /** Stash a prefill for the next CREATE-mode task form (used by "new task from
    *  selection"). Pass null to clear. */
   setNewTaskSeed: (seed: NewTaskSeed | null) => void;
+  /** Replace the persisted CREATE-mode task draft (null to clear). */
+  setTaskDraft: (draft: TaskDraft | null) => void;
   setBrowserActive: (active: boolean) => void;
   /** Pin (or unpin, with null) the browser pane to one agent's view. */
   setBrowserPinned: (agentId: string | null) => void;
@@ -360,7 +387,7 @@ const initialLeftTab: LeftTab = (() => {
   try {
     const v = window.localStorage.getItem(LS_LEFT_TAB);
     if (v === 'office' || v === 'terminal' || v === 'browser'
-      || v === 'files' || v === 'messages' || v === 'logs') return v;
+      || v === 'messages') return v;
   } catch { /* noop */ }
   return 'office';
 })();
@@ -393,6 +420,7 @@ export const useStore = create<State>((set) => ({
   leftTab: initialLeftTab,
   openTaskId: null,
   newTaskSeed: null,
+  taskDraft: null,
   prevLeftTab: initialLeftTab,
   browserActive: false,
   browserPinnedAgentId: null,
@@ -530,23 +558,27 @@ export const useStore = create<State>((set) => ({
   openTask: (id) =>
     set((s) => {
       if (id === null) {
-        // Closing always wipes any pending create-seed so it can't leak into a
-        // later unrelated CREATE opened from the board's "add task" button.
-        return { openTaskId: null, leftTab: s.prevLeftTab, newTaskSeed: null };
+        // Closing always wipes any pending create-seed + draft so neither can leak
+        // into a later unrelated CREATE opened from the board's "add task" button.
+        return { openTaskId: null, leftTab: s.prevLeftTab, newTaskSeed: null, taskDraft: null };
       }
       // Stash the current real tab once so reopening doesn't lose it.
       const prevLeftTab = s.leftTab === 'task' ? s.prevLeftTab : s.leftTab;
       // Only a CREATE opened straight from a selection carries a seed; opening a
       // real card means the user left that pending create, so drop the seed
-      // rather than let it leak into the next create.
+      // rather than let it leak into the next create. The draft is always reset
+      // here too, so STARTING a create begins blank — RETURNING to an in-progress
+      // one goes through setLeftTab('task'), which preserves the draft.
       return {
         openTaskId: id,
         leftTab: 'task',
         prevLeftTab,
-        newTaskSeed: id === NEW_TASK_ID ? s.newTaskSeed : null
+        newTaskSeed: id === NEW_TASK_ID ? s.newTaskSeed : null,
+        taskDraft: null
       };
     }),
   setNewTaskSeed: (seed) => set({ newTaskSeed: seed }),
+  setTaskDraft: (draft) => set({ taskDraft: draft }),
   setBrowserActive: (active) => set({ browserActive: active }),
   setBrowserPinned: (agentId) => set({ browserPinnedAgentId: agentId })
 }));
