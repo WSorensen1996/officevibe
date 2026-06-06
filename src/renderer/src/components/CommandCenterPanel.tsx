@@ -98,6 +98,25 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
 
 // ─── Memory tab ──────────────────────────────────────────────────────────────
 
+type ModelId = 'minilm' | 'embeddinggemma';
+
+interface MemoryStatus {
+  available: boolean;
+  enabled: boolean;
+  active: boolean;
+  initialized: boolean;
+  palacePath: string | null;
+  model: ModelId;
+  bin: string | null;
+}
+
+// Plain-language framing of each embedding model — lead with the benefit the user
+// actually chooses between, not the model's codename.
+const MEMORY_MODELS: { id: ModelId; title: string; detail: string }[] = [
+  { id: 'minilm',         title: 'Fast',         detail: 'English only · ~90 MB' },
+  { id: 'embeddinggemma', title: 'Multilingual', detail: 'all languages · ~300 MB' },
+];
+
 function MemoryTab({ godId }: { godId: string }) {
   const agents = useStore((s) => s.agents);
   const [who, setWho] = useState<string>(godId);
@@ -110,10 +129,27 @@ function MemoryTab({ godId }: { godId: string }) {
   const [textResults, setTextResults] = useState<Array<{ source: string; excerpt: string }>>([]);
   const [textSearched, setTextSearched] = useState(false);
   const [textBusy, setTextBusy] = useState(false);
+  // Semantic-memory engine status + controls (on/off, model). This is app-wide
+  // config, NOT per-agent — so it's independent of `who`/`godId`.
+  const [status, setStatus] = useState<MemoryStatus | null>(null);
 
   useEffect(() => {
     window.cth.projectMemory(who).then(setMem).catch(() => setMem(''));
   }, [who]);
+
+  const refreshStatus = async () => {
+    try { setStatus(await window.cth.memoryStatus()); } catch { /* ignore */ }
+  };
+  useEffect(() => { refreshStatus(); }, []);
+
+  const setModel = async (model: ModelId) => {
+    await window.cth.updateConfig({ embeddingModel: model });
+    await refreshStatus();
+  };
+  const toggleEnabled = async () => {
+    await window.cth.updateConfig({ semanticMemory: !(status?.enabled ?? true) });
+    await refreshStatus();
+  };
 
   const search = async () => {
     if (!query.trim()) return;
@@ -133,6 +169,17 @@ function MemoryTab({ godId }: { godId: string }) {
     } catch { setTextResults([]); }
     finally { setTextBusy(false); setTextSearched(true); }
   };
+
+  // One clear state line: is memory working, off, or not set up?
+  const state: { dot: string; label: string } = !status?.available
+    ? { dot: 'var(--cth-coral)', label: 'Not set up' }
+    : !status.enabled
+      ? { dot: 'var(--cth-ink-500)', label: 'Off' }
+      : status.initialized
+        ? { dot: 'var(--cth-mint)', label: 'On · ready' }
+        : { dot: 'var(--cth-lemon)', label: 'On · getting ready…' };
+
+  const canSearch = !!status?.available && !!status?.enabled;
 
   return (
     <Scroll>
@@ -162,6 +209,81 @@ function MemoryTab({ godId }: { godId: string }) {
         {textSearched && textResults.length === 0 && <Muted>Nothing matched.</Muted>}
       </Section>
 
+      <Section title="SEMANTIC MEMORY">
+        {/* Status + on/off — the two things the user controls at a glance. */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-ui)' }}>
+            <span style={{ width: 9, height: 9, background: state.dot, boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)' }} />
+            {state.label}
+          </span>
+          {status?.available && (
+            <PixelButton
+              variant={status.enabled ? 'secondary' : 'primary'}
+              size="sm"
+              onClick={toggleEnabled}
+            >
+              {status.enabled ? 'Turn off' : 'Turn on'}
+            </PixelButton>
+          )}
+        </div>
+
+        {/* Not installed: tell the user how to enable it, nothing else. */}
+        {!status?.available && (
+          <div style={{
+            fontSize: 12, color: 'var(--cth-ink-700)', lineHeight: 1.6,
+            background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)', padding: 10
+          }}>
+            Meaning-based search isn’t installed yet. Enable it with:
+            <div style={{ marginTop: 6 }}>
+              <code style={{
+                fontFamily: 'var(--cth-font-mono)', fontSize: 12, color: 'var(--cth-ink-900)',
+                background: 'var(--cth-paper-100)', padding: '2px 6px', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
+              }}>uv tool install mempalace</code>
+            </div>
+            <div style={{ marginTop: 8, color: 'var(--cth-ink-500)' }}>
+              Agents still keep plain notes without it.
+            </div>
+          </div>
+        )}
+
+        {/* Model: a benefit-framed choice, not a codename dump. */}
+        {status?.available && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 11, color: 'var(--cth-ink-500)', fontFamily: 'var(--cth-font-display)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              Search language
+            </span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {MEMORY_MODELS.map((m) => {
+                const sel = status.model === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => setModel(m.id)}
+                    style={{
+                      flex: 1, textAlign: 'left', cursor: 'pointer', border: 'none',
+                      padding: '7px 9px 6px',
+                      background: sel ? 'var(--cth-lemon-light)' : 'var(--cth-cream-100)',
+                      boxShadow: sel ? 'inset 0 0 0 2px var(--cth-ink-900)' : 'inset 0 0 0 1px var(--cth-ink-300)',
+                      fontFamily: 'var(--cth-font-ui)'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 13, color: 'var(--cth-ink-900)' }}>
+                      <span style={{
+                        width: 8, height: 8, flexShrink: 0,
+                        background: sel ? 'var(--cth-ink-900)' : 'transparent',
+                        boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)'
+                      }} />
+                      {m.title}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: 3 }}>{m.detail}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </Section>
+
       <Section title="SEMANTIC SEARCH (MemPalace)">
         <div style={{ display: 'flex', gap: 6 }}>
           <input
@@ -171,10 +293,11 @@ function MemoryTab({ godId }: { godId: string }) {
             placeholder="What does the project know about…"
             style={{ ...textareaStyle, height: 30 }}
           />
-          <PixelButton variant="primary" size="sm" onClick={search} disabled={busy || !query.trim()}>
+          <PixelButton variant="primary" size="sm" onClick={search} disabled={busy || !query.trim() || !canSearch}>
             {busy ? '…' : 'search'}
           </PixelButton>
         </div>
+        {!canSearch && <Muted>Turn semantic memory on to search by meaning.</Muted>}
         {searchOut && <Pre>{searchOut}</Pre>}
       </Section>
 

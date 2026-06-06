@@ -11,7 +11,8 @@ import { useStore } from '@/store/store';
  *  toggle, rendered inline in the tab body instead of a centered modal. */
 
 /** Whisper dictation model choices, shown as a two-option picker (mirrors the
- *  embedding-model grid in MemoryPanel). The id is the on-disk model folder name. */
+ *  embedding-model grid in the Command Center memory tab). The id is the on-disk
+ *  model folder name. */
 type SttModelId = HarnessConfig['sttModel'];
 const STT_MODELS: { id: SttModelId; title: string; detail: string }[] = [
   { id: 'whisper-base.en', title: 'Standard', detail: 'More accurate · ~78 MB' },

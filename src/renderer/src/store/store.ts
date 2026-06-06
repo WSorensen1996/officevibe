@@ -161,8 +161,8 @@ interface State {
   openTaskId: string | null;
   /** Prefill for the next CREATE-mode task form — set when spinning a new task
    *  out of selected result text, consumed by AddTaskForm. Cleared whenever the
-   *  full-card view closes so it never leaks into a later unrelated create.
-   *  Transient (not persisted). */
+   *  full-card view closes OR the user opens any other card / a blank "add task"
+   *  create, so it never leaks into a later unrelated create. Transient. */
   newTaskSeed: NewTaskSeed | null;
   /** The left tab that was active before a card was opened, so closing the
    *  full-card view returns the user where they were. Transient. */
@@ -536,7 +536,15 @@ export const useStore = create<State>((set) => ({
       }
       // Stash the current real tab once so reopening doesn't lose it.
       const prevLeftTab = s.leftTab === 'task' ? s.prevLeftTab : s.leftTab;
-      return { openTaskId: id, leftTab: 'task', prevLeftTab };
+      // Only a CREATE opened straight from a selection carries a seed; opening a
+      // real card means the user left that pending create, so drop the seed
+      // rather than let it leak into the next create.
+      return {
+        openTaskId: id,
+        leftTab: 'task',
+        prevLeftTab,
+        newTaskSeed: id === NEW_TASK_ID ? s.newTaskSeed : null
+      };
     }),
   setNewTaskSeed: (seed) => set({ newTaskSeed: seed }),
   setBrowserActive: (active) => set({ browserActive: active }),

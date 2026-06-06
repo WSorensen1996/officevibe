@@ -36,6 +36,7 @@ export type { ProjectTask, TaskUpdate } from './tasks/taskShared';
 export function TasksKanban() {
   const agents = useStore((s) => s.agents);
   const openTask = useStore((s) => s.openTask);
+  const setNewTaskSeed = useStore((s) => s.setNewTaskSeed);
   const {
     tasks,
     dispatchMsg,
@@ -69,7 +70,7 @@ export function TasksKanban() {
         <PixelButton
           variant="primary"
           size="sm"
-          onClick={() => openTask(NEW_TASK_ID)}
+          onClick={() => { setNewTaskSeed(null); openTask(NEW_TASK_ID); }}
           style={{ marginLeft: 'auto' }}
         >
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>

@@ -4,7 +4,6 @@ import { startMockLoop, stopMockLoop } from '@/store/mockEvents';
 import type { HarnessConfig } from '@/store/config';
 import { OfficeFloor } from '@/scene/office/OfficeFloor';
 import { useProject } from '@/hooks/useProject';
-import { MemoryPanel } from '@/components/MemoryPanel';
 import { CommandCenterPanel } from '@/components/CommandCenterPanel';
 import { AgentWorkspace } from '@/components/AgentWorkspace';
 import { AddAgentModal } from '@/components/AddAgentModal';
@@ -224,7 +223,6 @@ export function App() {
             {/* Office tab — kept mounted (display toggle) so Pixi keeps its avatars. */}
             <div style={{ position: 'absolute', inset: 0, display: leftTab === 'office' ? 'block' : 'none' }}>
               <OfficeFloor />
-              <MemoryPanel />
               {agentCount === 0 && godStatus === 'booting' && <MichaelBooting />}
               {agentCount === 0 && godStatus !== 'booting' && (
                 <div style={{
