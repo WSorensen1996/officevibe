@@ -67,36 +67,12 @@ export interface ProjectTask {
 
 export type Status = ProjectTask['status'];
 
-/** A card is "stale" if it was dispatched but has shown no activity for a while —
- *  the safety net for cards that stall despite the auto-advance (e.g. a dead agent
- *  that never posts a status update). Only in-flight columns can go stale
- *  (todo/doing); blocked/done/needs-approval are deliberately parked, not stalled.
- *  20 minutes with no newer of {statusUpdatedAt, dispatchedAt, last update ts}. */
-export const STALE_AFTER_MS = 20 * 60 * 1000;
-
-export function isTaskStale(task: ProjectTask, now: number = Date.now()): boolean {
-  if (task.archived) return false;
-  if (task.status !== 'todo' && task.status !== 'doing') return false;
-  if (!task.dispatchedAt) return false;
-  const ups = task.updates ?? [];
-  const lastUpdateTs = ups.length ? ups[ups.length - 1].ts : undefined;
-  const latest = Math.max(
-    Date.parse(task.statusUpdatedAt ?? '') || 0,
-    Date.parse(task.dispatchedAt) || 0,
-    lastUpdateTs ? (Date.parse(lastUpdateTs) || 0) : 0
-  );
-  return latest > 0 && latest < now - STALE_AFTER_MS;
-}
-
 /** Whether the dispatch button should show. Dispatchable columns only
  *  (todo/blocked), and hidden once dispatched until the task's status changes
  *  again — so a freshly dispatched card can't be re-dispatched, but a stuck or
- *  blocked one stays re-nudgeable. A STALE card is ALWAYS re-nudgeable (even when
- *  status==='doing'), so a stalled card can be kicked again. ISO-8601 UTC strings
- *  compare chronologically as plain strings (same convention the writeTasks merge
- *  relies on). */
+ *  blocked one stays re-nudgeable. ISO-8601 UTC strings compare chronologically
+ *  as plain strings (same convention the writeTasks merge relies on). */
 export function canDispatchTask(task: ProjectTask): boolean {
-  if (isTaskStale(task)) return true;
   if (task.status !== 'todo' && task.status !== 'blocked') return false;
   const dispatched = !!task.dispatchedAt
     && (!task.statusUpdatedAt || task.statusUpdatedAt <= task.dispatchedAt);

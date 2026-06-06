@@ -784,17 +784,6 @@ export class ProjectManager {
     if (!task || task.assignee === recipient) return; // unknown task or already assigned → no-op
     task.assignee = recipient;
     task.assigneeUpdatedAt = new Date().toISOString();
-    // Auto-advance the column out of To-do/Blocked on delegation so the card
-    // follows the handoff immediately (root-cause fix for "stuck in To-do"):
-    // moving the OWNER without moving the COLUMN left god-delegated cards parked
-    // until the worker posted 'doing' — which it often skips. The worker's later
-    // 'doing' is then a harmless no-op; blocked/done/needs-approval are left
-    // untouched. NOTE: this method early-returns above when assignee===recipient,
-    // so re-delegating to the SAME worker won't re-advance — acceptable.
-    if (task.status === 'todo' || task.status === 'blocked') {
-      task.status = 'doing';
-      task.statusUpdatedAt = new Date().toISOString();
-    }
     this.writeJson(join(root, 'tasks.json'), data);
     this.appendLog({ kind: 'task-delegated', taskId, to: recipient, from: msg.from });
     this.emit?.('project:taskUpdated', { taskId, by: recipient, kind: 'note', text: `delegated to ${recipient}` });
