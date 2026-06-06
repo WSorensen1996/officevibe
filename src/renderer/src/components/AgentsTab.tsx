@@ -3,7 +3,8 @@ import { AgentCard } from './AgentCard';
 import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
 import { Icon } from './Icon';
-import { useStore } from '@/store/store';
+import { disposeTerminal } from './terminalPool';
+import { useStore, type Agent } from '@/store/store';
 import { useAgentRestart } from '@/hooks/useAgentRestart';
 
 /** The agent roster as a Command-Center tab. The single home for the roster and
@@ -15,7 +16,20 @@ export function AgentsTab() {
   const select = useStore((s) => s.select);
   const setAddAgentOpen = useStore((s) => s.setAddAgentOpen);
   const toolCounts = useStore((s) => s.toolCounts);
+  const archiveAgent = useStore((s) => s.archiveAgent);
   const { restartingId, restart } = useAgentRestart();
+
+  // Remove an agent from the floor: kill its live pty + dispose its terminal,
+  // then archive it (reversible from the ARCHIVED section below). god is never
+  // archivable — the orchestrator must stay (the card also hides the button).
+  const handleArchive = async (a: Agent) => {
+    if (a.isGod) return;
+    if (a.ptyId) {
+      try { await window.cth.killPty(a.ptyId); } catch { /* pty already gone */ }
+      disposeTerminal(a.ptyId);
+    }
+    archiveAgent(a.id);
+  };
 
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 12, background: 'var(--cth-paper-200)' }}>
@@ -45,6 +59,7 @@ export function AgentsTab() {
             onPickModel={(m) => restart(a, { model: m })}
             onPickEffort={(e) => restart(a, { effort: e })}
             onRestart={() => restart(a, {})}
+            onArchive={() => handleArchive(a)}
           />
         ))}
       </div>

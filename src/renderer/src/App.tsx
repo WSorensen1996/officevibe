@@ -128,17 +128,27 @@ export function App() {
     if (!config?.onboardingComplete) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
-      if (overlayOpen || useStore.getState().openTaskId) return;
+      // Read live: overlay/openTask state changes shouldn't require re-subscribing,
+      // and a stale closure could let this fire over a just-opened modal/task form.
+      const st = useStore.getState();
+      const overlay = st.addAgentOpen || !!st.quitWarn
+        || !!st.fullscreenAgentId || !!st.fullscreenFilePath;
+      // A task view (incl. the new-task form) is open → it owns ⌘/Ctrl+Enter (submit).
+      if (overlay || st.openTaskId) return;
+      // Skip while TYPING in an editable field (message composers send with this
+      // combo). Clicking the office floor / an empty area focuses the body or a
+      // non-editable element, so it is NOT treated as typing — the combo fires.
       const el = document.activeElement as HTMLElement | null;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
       e.preventDefault();
-      const st = useStore.getState();
       st.setNewTaskSeed(null);
       st.openTask(NEW_TASK_ID);
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [config?.onboardingComplete, overlayOpen]);
+    // Capture phase so a child that stopPropagation()s keydown (xterm, the Pixi
+    // office canvas, etc.) can't swallow the combo before this window handler runs.
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [config?.onboardingComplete]);
 
   if (!config) {
     return <div style={{ width: '100vw', height: '100vh', background: 'var(--cth-cream-100)' }} />;
@@ -164,6 +174,65 @@ export function App() {
         />
       )}
 
+      {/* Full-width top bar: spans above BOTH panels. Project switcher at the far
+          left, then one uniform card per active agent (`agents` — archived live
+          in a separate list). Clicking a card selects that agent (drives the left
+          workspace tabs); the selected card gets an accent ring. Scrolls
+          horizontally so a large roster never breaks the layout. */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '0 16px', marginBottom: 8, flexShrink: 0,
+        overflowX: 'auto'
+      }}>
+        <ProjectSwitcher config={config} />
+        {agents.map((a) => (
+          <div
+            key={a.id}
+            role="button"
+            title={`${a.name} — click to drive the terminal/files/messages/logs tabs`}
+            onClick={() => select(a.id)}
+            style={{
+              flexShrink: 0, cursor: 'pointer',
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              maxWidth: 240, padding: '3px 8px',
+              background: 'var(--cth-cream-200)',
+              boxShadow: a.id === selectedId
+                ? 'inset 0 0 0 2px var(--cth-ink-900)'
+                : 'inset 0 0 0 1px var(--cth-ink-700)'
+            }}
+          >
+            {/* Accent-tinted portrait box — same framing as the Command Center. */}
+            <div style={{
+              width: 22, height: 28, flexShrink: 0,
+              background: `var(--cth-${a.accent}-light)`,
+              boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
+              display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+              overflow: 'hidden'
+            }}>
+              <SpritePortrait character={a.character} scale={1} />
+            </div>
+            {/* Name on top; status badge + live action below (truncates). */}
+            <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+              <span style={{
+                fontFamily: 'var(--cth-font-display)', fontSize: 9, lineHeight: '14px',
+                color: 'var(--cth-ink-900)',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+              }}>{a.name.toUpperCase()}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <PixelBadge status={a.status} />
+                <span style={{
+                  minWidth: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 12,
+                  color: 'var(--cth-ink-500)',
+                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+                }}>{(a.action || '').trim() || a.description}</span>
+              </div>
+            </div>
+            {/* Pulsing cues when this agent is browsing or needs you. */}
+            <AttentionCues agent={a} />
+          </div>
+        ))}
+      </div>
+
       <div style={{
         flex: 1, minHeight: 0,
         display: 'flex',
@@ -171,98 +240,6 @@ export function App() {
         gap: 0
       }}>
         <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-          {/* Project switcher: open/create/switch the active project (relaunches).
-              The selected-agent chip on the right shows whose workspace the agent
-              tabs (terminal/files/messages/logs) are pointed at. */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <ProjectSwitcher config={config} />
-            {/* Active-agent strip: one compact clickable badge per agent in the
-                roster (archived agents live in a separate list, so this is the
-                active set). Click selects; the selected one gets an accent ring.
-                Scrolls horizontally so it never pushes the right-side chip off. */}
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: 4,
-              minWidth: 0, overflowX: 'auto', flex: '0 1 auto'
-            }}>
-              {agents.map((a) => (
-                <button
-                  key={a.id}
-                  type="button"
-                  title={a.name}
-                  onClick={() => select(a.id)}
-                  style={{
-                    flexShrink: 0,
-                    display: 'inline-flex', alignItems: 'center', gap: 4,
-                    padding: 2, border: 'none', cursor: 'pointer',
-                    background: a.id === selectedId ? 'var(--cth-cream-200)' : 'transparent',
-                    boxShadow: a.id === selectedId
-                      ? 'inset 0 0 0 2px var(--cth-ink-900)'
-                      : 'inset 0 0 0 1px var(--cth-ink-300)'
-                  }}
-                >
-                  <div style={{
-                    width: 20, height: 24, flexShrink: 0,
-                    background: `var(--cth-${a.accent}-light)`,
-                    boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
-                    display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
-                    overflow: 'hidden'
-                  }}>
-                    <SpritePortrait character={a.character} scale={1} />
-                  </div>
-                  <PixelBadge status={a.status} label="" />
-                </button>
-              ))}
-            </div>
-            <div style={{ marginLeft: 'auto', minWidth: 0 }}>
-              {agent ? (
-                <div
-                  title={`selected agent — drives the terminal/files/messages/logs tabs`}
-                  style={{
-                    display: 'inline-flex', alignItems: 'center', gap: 6,
-                    maxWidth: 300, padding: '3px 8px',
-                    background: 'var(--cth-cream-200)',
-                    boxShadow: `inset 0 0 0 1px var(--cth-ink-700)`
-                  }}
-                >
-                  {/* Portrait — framed like the Command Center header so it's clear
-                      WHO is selected; the accent-tinted box keeps the per-agent cue. */}
-                  <div style={{
-                    width: 22, height: 28, flexShrink: 0,
-                    background: `var(--cth-${agent.accent}-light)`,
-                    boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
-                    display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
-                    overflow: 'hidden'
-                  }}>
-                    <SpritePortrait character={agent.character} scale={1} />
-                  </div>
-                  {/* Name on top; status badge + live action below (truncates). */}
-                  <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
-                    <span style={{
-                      fontFamily: 'var(--cth-font-display)', fontSize: 9, lineHeight: '14px',
-                      color: 'var(--cth-ink-900)',
-                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-                    }}>{agent.name.toUpperCase()}</span>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                      <PixelBadge status={agent.status} />
-                      <span style={{
-                        minWidth: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 12,
-                        color: 'var(--cth-ink-500)',
-                        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-                      }}>{(agent.action || '').trim() || agent.description}</span>
-                    </div>
-                  </div>
-                  {/* Pulsing cues when the selected agent is browsing or needs you —
-                      one click jumps to the relevant tab. */}
-                  <AttentionCues agent={agent} />
-                </div>
-              ) : (
-                <span style={{
-                  fontFamily: 'var(--cth-font-display)', fontSize: 9, lineHeight: '14px',
-                  color: 'var(--cth-ink-300)'
-                }}>NO AGENT SELECTED</span>
-              )}
-            </div>
-          </div>
           {/* Tab bar: office + the selected agent's workspace + the shared browser
               + a transient TASK tab when a card's full view is open. */}
           <LeftTabs

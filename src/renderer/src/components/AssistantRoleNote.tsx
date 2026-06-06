@@ -2,8 +2,8 @@ import { Icon } from './Icon';
 import { useStore } from '@/store/store';
 
 /** Footer shown under the assistant's terminal in place of a message composer.
- *  Dwight isn't messaged directly, so this explains its role rather than
- *  offering a composer, and points to Michael. */
+ *  Dwight is Michael's co-orchestrator — work is delegated to him by Michael
+ *  rather than typed here, so this explains his role and points to Michael. */
 export function AssistantRoleNote() {
   const select = useStore((s) => s.select);
 
@@ -17,7 +17,7 @@ export function AssistantRoleNote() {
     }}>
       <Icon name="sparkle" />
       <div style={{ flex: 1, minWidth: 0, fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-700)' }}>
-        Dwight is Michael's silent prep assistant. It isn't messaged directly and has no standing task right now.
+        Dwight is Michael's co-orchestrator — he handles the todo batches Michael delegates and can fan them out to the team. Michael stays primary (owns the board + the human channel).
       </div>
       <button
         onClick={() => select('god')}

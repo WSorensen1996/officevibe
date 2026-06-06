@@ -28,7 +28,7 @@ export function useAgentRestart() {
       const hive = a.isGod
         ? { id: a.id, name: a.name, cwd: a.cwd, isGod: true, role: 'orchestrator (god)' }
         : a.isAssistant
-        ? { id: a.id, name: a.name, cwd: a.cwd, isAssistant: true, role: "Michael's prep assistant" }
+        ? { id: a.id, name: a.name, cwd: a.cwd, isAssistant: true, role: "Michael's co-orchestrator" }
         : { id: a.id, name: a.name, cwd: a.cwd, role: a.description };
       const res = await window.cth.spawnPty({ id: a.ptyId, cwd: a.cwd, command: exe, args, cols: 100, rows: 30, hive });
       if (res.ok) updateAgent(a.id, { command: command.trim(), model, effort, status: 'idle', action: 'restarting…' });

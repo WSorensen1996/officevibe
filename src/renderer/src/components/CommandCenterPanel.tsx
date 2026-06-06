@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { TasksKanban } from './TasksKanban';
@@ -9,22 +9,20 @@ import { SettingsTab } from './SettingsTab';
 import { UsageMeter } from './UsageMeter';
 import { Select } from './Select';
 import { Icon } from './Icon';
-import { formatLogEntry, type LogEntry } from './logFormat';
 import { useStore, type Agent } from '@/store/store';
 
 /** Michael's control surface — the always-on overview pinned to the right column.
  *  His terminal lives on the LEFT (the AgentWorkspace, like every other agent);
  *  here we surface a task board that dispatches & schedules work, the agent
- *  roster, a memory view, and a live activity feed / board / usage meter. */
+ *  roster, a memory view, skills, a command handbook, and connections. */
 
-type CCTab = 'tasks' | 'agents' | 'memory' | 'skills' | 'activity' | 'handbook' | 'connections' | 'settings';
+type CCTab = 'tasks' | 'agents' | 'memory' | 'skills' | 'handbook' | 'connections' | 'settings';
 
 const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'] }[] = [
   { key: 'tasks', label: 'tasks', icon: 'check' },
   { key: 'agents', label: 'agents', icon: 'mcp' },
   { key: 'memory', label: 'memory', icon: 'sparkle' },
   { key: 'skills', label: 'skills', icon: 'book' },
-  { key: 'activity', label: 'activity', icon: 'bell' },
   { key: 'handbook', label: 'commands', icon: 'code' },
   { key: 'connections', label: 'connections', icon: 'web' },
   { key: 'settings', label: 'settings', icon: 'gear' }
@@ -66,12 +64,9 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
         padding: '6px 8px', background: 'var(--cth-cream-100)',
         borderBottom: '1px solid var(--cth-ink-700)', flexShrink: 0
       }}>
-        {/* The selected agent's identity (portrait/status/role) lives in the
-            top-left chip now, so the header just carries the title. */}
-        <div style={{
-          flex: 1, minWidth: 0,
-          fontFamily: 'var(--cth-font-display)', fontSize: 10, lineHeight: '14px', color: 'var(--cth-ink-900)'
-        }}>COMMAND CENTER</div>
+        {/* Title text removed — the agent cards in the full-width top bar carry
+            identity now; this spacer keeps the usage meter pushed to the right. */}
+        <div style={{ flex: 1, minWidth: 0 }} />
         {/* Claude usage: current session (5h) + weekly (7d). Relocated here from
             the removed title bar. */}
         <UsageMeter />
@@ -111,7 +106,6 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
         {tab === 'tasks' && <TasksKanban />}
         {tab === 'memory' && <MemoryTab godId={agent.id} />}
         {tab === 'skills' && <SkillsTab />}
-        {tab === 'activity' && <ActivityTab />}
         {tab === 'handbook' && <HandbookTab />}
         {tab === 'agents' && <AgentsTab />}
         {tab === 'connections' && <McpTab />}
@@ -344,95 +338,6 @@ function MemoryTab({ godId }: { godId: string }) {
   );
 }
 
-// ─── Activity tab — log feed + board + usage ─────────────────────────────────
-
-function ActivityTab() {
-  const agents = useStore((s) => s.agents);
-  const [log, setLog] = useState<LogEntry[]>([]);
-  const [board, setBoard] = useState('');
-  // Per-agent estimated cost, reported up by each UsageRow so the bars can be
-  // normalized against the most-expensive agent in the office.
-  const [costs, setCosts] = useState<Record<string, number>>({});
-  const reportCost = (id: string) => (cost: number) =>
-    setCosts((prev) => (prev[id] === cost ? prev : { ...prev, [id]: cost }));
-  const maxCost = Math.max(0.0001, ...agents.map((a) => costs[a.id] ?? 0));
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  useEffect(() => {
-    const refresh = async () => {
-      try { setLog((await window.cth.projectLog(60)) as LogEntry[]); } catch { /* noop */ }
-      try { setBoard(await window.cth.projectBoard()); } catch { /* noop */ }
-    };
-    refresh();
-    timer.current = setInterval(refresh, 3000);
-    return () => { if (timer.current) clearInterval(timer.current); };
-  }, []);
-
-  return (
-    <Scroll>
-      <Section title="USAGE (this session)">
-        {agents.map((a) => (
-          <UsageRow key={a.id} name={a.name} cwd={a.cwd} maxCost={maxCost} onCost={reportCost(a.id)} />
-        ))}
-        <Muted>tokens from ~/.claude/projects/ transcripts</Muted>
-      </Section>
-
-      <Section title="ACTIVITY">
-        {log.length === 0 && <Muted>Nothing yet.</Muted>}
-        {[...log].reverse().map((e, i) => (
-          <div key={i} style={{ fontSize: 12, color: 'var(--cth-ink-700)', padding: '2px 0', display: 'flex', gap: 6 }}>
-            <span style={{ color: 'var(--cth-ink-300)', flexShrink: 0 }}>{e.kind ?? '·'}</span>
-            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{formatLogEntry(e)}</span>
-          </div>
-        ))}
-      </Section>
-
-      <Section title="BOARD">
-        <Pre>{board || 'The board is empty.'}</Pre>
-      </Section>
-    </Scroll>
-  );
-}
-
-/** One agent's real token usage, polled from its Claude Code transcripts on
- *  mount and every 10s. Renders: name | input Kt | output Kt | est $X.XX, with
- *  a bar normalized to the most-expensive agent (via the lifted-up cost). */
-function UsageRow({ name, cwd, maxCost, onCost }: {
-  name: string; cwd: string; maxCost: number; onCost: (cost: number) => void;
-}) {
-  const [usage, setUsage] = useState<{ inputTokens: number; outputTokens: number; estimatedCostUsd: number } | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    const refresh = async () => {
-      try {
-        const u = await window.cth.agentUsage(cwd);
-        if (!alive || !u) return;
-        setUsage(u);
-        onCost(u.estimatedCostUsd);
-      } catch { /* noop */ }
-    };
-    refresh();
-    const id = setInterval(refresh, 10000);
-    return () => { alive = false; clearInterval(id); };
-    // onCost is recreated each render but stable in behavior; cwd is the real key.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cwd]);
-
-  const inK = usage ? (usage.inputTokens / 1000).toFixed(1) : '0.0';
-  const outK = usage ? (usage.outputTokens / 1000).toFixed(1) : '0.0';
-  const cost = usage?.estimatedCostUsd ?? 0;
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
-      <span style={{ fontSize: 12, color: 'var(--cth-ink-700)', width: 90 }}>{name}</span>
-      <Bar value={cost} max={maxCost} />
-      <span style={{ fontSize: 11, color: 'var(--cth-ink-500)', width: 56, textAlign: 'right' }}>{inK}/{outK}Kt</span>
-      <span style={{ fontSize: 11, color: 'var(--cth-ink-700)', width: 52, textAlign: 'right' }}>${cost.toFixed(2)}</span>
-    </div>
-  );
-}
-
 // ─── Handbook tab — copyable Claude command reference ────────────────────────
 
 interface Cmd { cmd: string; kind: 'slash' | 'cli'; desc: string; usage?: string }
@@ -599,15 +504,6 @@ export function Pre({ children, maxHeight = 200 }: { children: React.ReactNode; 
       fontFamily: 'var(--cth-font-mono)', fontSize: 12, lineHeight: '16px',
       color: 'var(--cth-ink-900)', whiteSpace: 'pre-wrap', wordBreak: 'break-word'
     }}>{children}</pre>
-  );
-}
-
-function Bar({ value, max }: { value: number; max: number }) {
-  const pct = Math.round((value / max) * 100);
-  return (
-    <div style={{ flex: 1, height: 8, background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)' }}>
-      <div style={{ width: `${pct}%`, height: '100%', background: 'var(--cth-mint)' }} />
-    </div>
   );
 }
 

@@ -2,6 +2,7 @@ import { PixelPanel } from './PixelPanel';
 import { PixelBadge, StatusKind } from './PixelBadge';
 import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
+import { Icon } from './Icon';
 import { Select } from './Select';
 import { AccentColorName } from '@/design/tokens';
 import { OfficeCharacterName } from '@/scene/office/cast';
@@ -37,11 +38,13 @@ export interface AgentCardProps {
   onPickEffort?: (effort: EffortLevel | undefined) => void;
   /** Restart the agent under its current model + effort. */
   onRestart?: () => void;
+  /** Remove the agent from the floor → ARCHIVED (reversible). Hidden for god. */
+  onArchive?: () => void;
 }
 
 export function AgentCard({
   name, character, accent, status, project, action, progress = 0, selected, isGod, onClick,
-  model, effort, toolCalls, restarting, canRestart, onPickModel, onPickEffort, onRestart
+  model, effort, toolCalls, restarting, canRestart, onPickModel, onPickEffort, onRestart, onArchive
 }: AgentCardProps) {
   // The god is always framed (stands out from the row); others only when selected.
   const framed = isGod || selected;
@@ -173,6 +176,18 @@ export function AgentCard({
                   onClick={onRestart}
                   style={{ flexShrink: 0 }}
                 >restart</PixelButton>
+                {/* Remove → archive (reversible from the ARCHIVED section). Never
+                    shown for god — the orchestrator must stay on the floor. */}
+                {onArchive && !isGod && (
+                  <PixelButton
+                    variant="secondary"
+                    size="sm"
+                    disabled={restarting}
+                    onClick={onArchive}
+                    title="remove agent (move to Archived)"
+                    style={{ flexShrink: 0 }}
+                  ><Icon name="x" /></PixelButton>
+                )}
               </div>
               {onPickEffort && (
                 <Select

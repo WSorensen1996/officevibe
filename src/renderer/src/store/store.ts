@@ -78,8 +78,8 @@ export interface Agent {
   lastPrompt?: string;
   /** the orchestrator ("god") agent — seated in Michael's room, runs the floor */
   isGod?: boolean;
-  /** Michael's silent prep assistant ("Dwight"). Send-only: never receives
-   *  inbox/broadcast mail. */
+  /** Michael's co-orchestrator ("Dwight"). Acts on the todos/batches Michael
+   *  delegates to him and can delegate to workers; still excluded from broadcasts. */
   isAssistant?: boolean;
   /** When git isolation is enabled, the dedicated worktree path the agent runs
    *  in (its own `agent/<id>` branch); undefined for shared-cwd agents. */

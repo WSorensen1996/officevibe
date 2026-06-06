@@ -181,7 +181,7 @@ export function useProject(config: HarnessConfig | null): void {
         args,
         cols: 100,
         rows: 30,
-        hive: { id: ASSISTANT_ID, name: 'Dwight', cwd: config.activeProjectPath!, isAssistant: true, role: "Michael's prep assistant" }
+        hive: { id: ASSISTANT_ID, name: 'Dwight', cwd: config.activeProjectPath!, isAssistant: true, role: "Michael's co-orchestrator" }
       });
       if (cancelled || !res.ok) { assistantSpawning.current = false; return; }
       const assistant: Agent = {
@@ -189,7 +189,7 @@ export function useProject(config: HarnessConfig | null): void {
         name: 'Dwight',
         character: 'dwight',
         accent: 'sky',
-        description: "Michael's silent prep assistant",
+        description: "Michael's co-orchestrator",
         project: projectLabel,
         cwd: config.activeProjectPath!,
         status: 'idle',
