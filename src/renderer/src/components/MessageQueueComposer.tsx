@@ -14,23 +14,14 @@ export interface MessageQueueComposerProps {
  * Lets the user keep messaging an agent whose terminal is mid-run. Typed
  * messages park in a per-agent queue and are submitted to the agent's Claude
  * TUI one-by-one as soon as it goes idle (see useProject's flush loop).
- *
- * For Michael, a global "enrich" toggle decides routing: OFF → messages type
- * straight into Michael; ON → they're routed through the assistant ("Dwight"),
- * which gathers repo context and forwards an improved prompt to Michael.
  */
 export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
   const queue = useStore((s) => s.messageQueues[agent.id]) ?? EMPTY_QUEUE;
   const enqueueMessage = useStore((s) => s.enqueueMessage);
   const removeQueuedMessage = useStore((s) => s.removeQueuedMessage);
   const clearQueue = useStore((s) => s.clearQueue);
-  const enrichEnabled = useStore((s) => s.enrichEnabled);
-  const setEnrichEnabled = useStore((s) => s.setEnrichEnabled);
 
   const [text, setText] = useState('');
-
-  // The enrich toggle governs Michael's queue (it routes through the assistant).
-  const showEnrichToggle = !!agent.isGod;
 
   const idle = agent.status === 'idle';
 
@@ -49,8 +40,6 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
 
   const statusHint = queue.length === 0
     ? null
-    : showEnrichToggle && enrichEnabled
-    ? `→ Dwight (enrich) → Michael · ${queue.length} queued`
     : idle
     ? `sending to ${agent.name} one-by-one…`
     : `${agent.name} is busy — ${queue.length} queued`;
@@ -65,7 +54,7 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
       gap: 6,
       padding: 8
     }}>
-      {/* Header: label, count, status, enrich toggle (Michael only), clear-all */}
+      {/* Header: label, count, status, clear-all */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span style={{
           fontFamily: 'var(--cth-font-display)',
@@ -83,7 +72,7 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
         {statusHint && (
           <span style={{
             fontSize: 12,
-            color: showEnrichToggle && enrichEnabled ? 'var(--cth-ink-900)' : idle ? 'var(--cth-ink-700)' : 'var(--cth-ink-500)',
+            color: idle ? 'var(--cth-ink-700)' : 'var(--cth-ink-500)',
             whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
           }}>{statusHint}</span>
         )}
@@ -143,9 +132,8 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
         </div>
       )}
 
-      {/* Composer. Michael gets a right-hand control column with the enrich
-          toggle stacked directly above send; other agents get a plain send. */}
-      <div style={{ display: 'flex', gap: 6, alignItems: showEnrichToggle ? 'stretch' : 'flex-end' }}>
+      {/* Composer: textarea + dictation + send. */}
+      <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end' }}>
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -166,40 +154,11 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
           }}
         />
         <MicButton onTranscript={(t) => setText((p) => (p ? `${p} ${t}` : t))} />
-        {showEnrichToggle ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 5, width: 120, flexShrink: 0 }}>
-            <button
-              onClick={() => setEnrichEnabled(!enrichEnabled)}
-              title={enrichEnabled
-                ? 'Enrich ON — messages route through Dwight (adds repo context) before Michael'
-                : 'Enrich OFF — messages go straight to Michael'}
-              style={{
-                height: 30, width: '100%',
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                border: 'none', cursor: 'pointer',
-                background: enrichEnabled ? 'var(--cth-lemon)' : 'var(--cth-cream-100)',
-                color: 'var(--cth-ink-900)',
-                boxShadow: enrichEnabled
-                  ? 'inset 0 0 0 2px var(--cth-ink-900), 0 2px 0 var(--cth-ink-900)'
-                  : 'inset 0 0 0 2px var(--cth-ink-700), 0 2px 0 var(--cth-ink-700)',
-                fontFamily: 'var(--cth-font-ui)', fontSize: 13
-              }}
-            >
-              <Icon name="sparkle" /> enrich {enrichEnabled ? 'on' : 'off'}
-            </button>
-            <PixelButton variant="primary" size="md" fullWidth onClick={queueIt} disabled={!text.trim()}>
-              <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', justifyContent: 'center' }}>
-                send <Icon name="arrow-right" />
-              </span>
-            </PixelButton>
-          </div>
-        ) : (
-          <PixelButton variant="primary" size="md" onClick={queueIt} disabled={!text.trim()}>
-            <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-              send <Icon name="arrow-right" />
-            </span>
-          </PixelButton>
-        )}
+        <PixelButton variant="primary" size="md" onClick={queueIt} disabled={!text.trim()}>
+          <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+            send <Icon name="arrow-right" />
+          </span>
+        </PixelButton>
       </div>
     </div>
   );

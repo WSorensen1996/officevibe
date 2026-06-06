@@ -9,6 +9,7 @@ import { Icon } from './Icon';
 import { PriorityDots, AddTaskForm } from './TasksKanban';
 import {
   COLUMNS,
+  NEEDS_APPROVAL,
   UPDATE_COLOR,
   shortWhen,
   intervalLabel,
@@ -248,7 +249,7 @@ export function TaskDetailPanel() {
         <Scroll>
           <AddTaskForm
             agents={agents}
-            existing={tasks}
+            existing={tasks.filter((t) => !t.archived)}
             seed={newTaskSeed ?? undefined}
             onCancel={() => openTask(null)}
             onSubmit={(t, schedule) => { addTask(t, schedule); openTask(null); }}
@@ -284,7 +285,11 @@ export function TaskDetailPanel() {
   const pr = Math.max(1, Math.min(5, task.priority));
   const updates = task.updates ?? [];
   const deliverables = extractDeliverableSlugs(task);
-  const statusCol = COLUMNS.find((c) => c.key === task.status);
+  // needs-approval isn't a column (it's the BLOCKED column's top sub-section), so
+  // resolve its label+accent from NEEDS_APPROVAL before falling back to COLUMNS.
+  const statusCol = task.status === NEEDS_APPROVAL.key
+    ? NEEDS_APPROVAL
+    : COLUMNS.find((c) => c.key === task.status);
   const mission = missionFor(task.id);
 
   return (
@@ -360,7 +365,7 @@ export function TaskDetailPanel() {
           <AddTaskForm
             key={task.id}
             agents={agents}
-            existing={tasks.filter((t) => t.id !== task.id)}
+            existing={tasks.filter((t) => !t.archived && t.id !== task.id)}
             initial={task}
             initialMission={mission}
             onCancel={() => openTask(null)}

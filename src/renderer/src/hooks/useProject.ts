@@ -25,17 +25,6 @@ const INITIAL_GOD_PROMPT = [
   'Then begin orchestrating: triage requests, delegate work to the team, and keep everyone unblocked. You are fully autonomous — there is no approval queue, so handle tool-permission prompts in this session yourself (the human can approve them remotely from their phone).'
 ].join('\n');
 
-/** Wrap a user message as an enrich task for the assistant. The assistant's
- *  system prompt has the full instructions; this just frames the one task. */
-function enrichTaskPrompt(text: string): string {
-  return [
-    `ENRICH TASK: ${text}`,
-    '',
-    '(Identify the relevant project, cd in, gather READ-ONLY context, then send the improved,',
-    'self-contained prompt to Michael via an outbox message with "to":"god". Do not do the task yourself.)'
-  ].join('\n');
-}
-
 /** Tool name → where the avatar walks + what it carries. */
 const TOOL_STATION: Record<string, { station: StationKind; carry?: ToolKind }> = {
   Read: { station: 'shelf', carry: 'Read' },
@@ -200,7 +189,7 @@ export function useProject(config: HarnessConfig | null): void {
         name: 'Dwight',
         character: 'dwight',
         accent: 'sky',
-        description: "assistant — enriches prompts with repo context, forwards them to Michael",
+        description: "Michael's silent prep assistant",
         project: projectLabel,
         cwd: config.activeProjectPath!,
         status: 'idle',
@@ -498,11 +487,11 @@ export function useProject(config: HarnessConfig | null): void {
     };
 
     const flush = () => {
-      const { agents, messageQueues, enrichEnabled } = useStore.getState();
+      const { agents, messageQueues } = useStore.getState();
       const byId = (id: string) => agents.find((a) => a.id === id);
 
       // Sub-agents (and the assistant's own direct queue): flush verbatim into
-      // their own terminal. Michael's queue is handled specially below.
+      // their own terminal. Michael's queue is handled separately below.
       for (const a of agents) {
         if (a.id === GOD_ID) continue;
         if (!a.ptyId || a.status !== 'idle') continue;
@@ -510,11 +499,9 @@ export function useProject(config: HarnessConfig | null): void {
         dispatch(a.id, a);
       }
 
-      // Michael's queue: enrich OFF → straight to Michael; enrich ON → wrap as an
-      // ENRICH TASK and route to the assistant, which forwards to Michael's inbox.
+      // Michael's queue: typed straight into Michael.
       if (messageQueues[GOD_ID]?.length) {
-        if (enrichEnabled) dispatch(GOD_ID, byId(ASSISTANT_ID), enrichTaskPrompt);
-        else dispatch(GOD_ID, byId(GOD_ID));
+        dispatch(GOD_ID, byId(GOD_ID));
       }
     };
 

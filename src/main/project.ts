@@ -57,12 +57,13 @@ export interface AgentSay {
 
 /** A short status note an agent posts onto a task (the human's board TLDR).
  *  `by` is the authoring agent (stamped from the owning outbox dir, not trusted
- *  from the file). `kind` doubles as the auto-move target: doing/blocked/done
- *  slide the card into that column; `note` is informational only. */
+ *  from the file). `kind` doubles as the auto-move target: doing/blocked/done/
+ *  needs-approval slide the card into that column/sub-section; `note` is
+ *  informational only. ('needs-approval' parks a plan-mode plan for sign-off.) */
 export interface TaskUpdate {
   ts: string;                 // ISO — stamped by the harness at ingest
   by: string;                 // agentId (authoritative = owning outbox dir)
-  kind: 'doing' | 'blocked' | 'done' | 'note';
+  kind: 'doing' | 'blocked' | 'needs-approval' | 'done' | 'note';
   text: string;
 }
 
@@ -71,7 +72,7 @@ export interface ProjectTask {
   title: string;
   description?: string;
   assignee?: string;
-  status: 'todo' | 'doing' | 'blocked' | 'done';
+  status: 'todo' | 'doing' | 'blocked' | 'needs-approval' | 'done';
   dependsOn: string[];
   priority: number;
   createdAt: string;
@@ -90,6 +91,10 @@ export interface ProjectTask {
    *  unread/"just finished" indicator. Renderer-owned: round-trips via the
    *  writeTasks `...t` spread and is untouched by appendTaskUpdate. */
   viewedAt?: string;
+  /** Human-set: dispatch tells the agent to PLAN (not implement) and park the
+   *  task in needs-approval for sign-off. Renderer-owned: round-trips via the
+   *  writeTasks `...t` spread (like attachments) and is untouched here. */
+  planMode?: boolean;
 }
 
 export interface AgentMeta {
@@ -99,8 +104,8 @@ export interface AgentMeta {
   capabilities?: string[];
   cwd: string;
   isGod?: boolean;
-  /** Michael's prep assistant — enriches prompts and forwards them to Michael.
-   *  Send-only: excluded from broadcast fan-out so it never drains an inbox. */
+  /** Michael's silent prep assistant. Send-only: excluded from broadcast
+   *  fan-out so it never drains an inbox. */
   isAssistant?: boolean;
 }
 
@@ -625,7 +630,7 @@ export class ProjectManager {
     const godLine = meta.isGod
       ? 'You are the GOD / ORCHESTRATOR of this project — your job is to ORCHESTRATE, not to implement: maintain live situational awareness and delegate the work. (1) AWARENESS — always know what is going on: keep an accurate picture of every agent (active vs archived/idle), the task board, and all in-flight work; drain your inbox continually and triage every other agent\'s requests, answering clarifications so the team runs autonomously. (2) DELEGATE — decompose work and fan it out to the project agents via their inboxes (route messages and assign owners; do not do their jobs); do NOT take on grunt implementation yourself. (3) OWN ONLY THE IMPORTANT, high-leverage things — task decomposition, dispatch decisions, sign-offs, conflict resolution, branch integration, and final QA — and remain the sole scribe of board.md. You are otherwise fully autonomous — there is NO separate approval queue. For the genuinely critical (destructive actions, spending real money, scope changes, unresolvable conflicts), ask the human directly in your own session and let the tool-permission prompt gate the action; the human approves natively, including remotely from their phone via /remote-control. Keep the team unblocked. WEB/BROWSER work is DELEGABLE: every agent now has its OWN live browser, so route web/browser tasks to the agent that owns the work instead of funneling them all to yourself — you MAY still browse yourself when it is the high-leverage move (quick research, a sign-off check), but do not become the team\'s sole web operator.'
       : meta.isAssistant
-      ? 'You are Michael\'s PREP ASSISTANT. You will be handed short, possibly vague instructions (each begins with "ENRICH TASK:"). For each one: (1) figure out which project it concerns and cd into the most relevant repo — you start in Michael\'s home directory; (2) gather concrete context READ-ONLY (exact file paths, current state, relevant code, conventions, active branch, gotchas) — NEVER modify, create, or delete files; (3) rewrite the instruction into ONE clear, self-contained prompt that Michael can execute autonomously, preserving the user\'s original intent without inventing scope. Then deliver it: write ONE message JSON into your outbox with "to":"god", "act":"request", a short subject, and the finished prompt as the body. Do NOT perform the task yourself — your only output is the improved prompt sent to Michael.'
+      ? 'You are Michael\'s silent prep assistant. You are not on the office floor and not in the agent roster. You have no standing task right now: stay idle unless Michael hands you a specific instruction, then carry it out READ-ONLY (gather context — never modify, create, or delete files) and report back by writing ONE message JSON into your outbox with "to":"god". For anything ambiguous, address a message to "god".'
       : 'For anything ambiguous, cross-cutting, or needing sign-off, address a message to "god".';
     // Every agent owns a live browser (the built-in browser MCP server is granted
     // to all agents). Tell them how to use it and how the user watches it.
@@ -643,7 +648,7 @@ export class ProjectManager {
       `2. Record durable facts, decisions, and context by appending to ${dir}/memory.md.`,
       `3. To ask another agent for something or share information, write ONE message JSON into ${dir}/outbox/ (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox.`,
       '4. At the END of a task, append what you learned to memory.md so future-you remembers.',
-      `5. If a task you were given includes a [task:<id>] marker, report progress to the human by writing ONE JSON file into ${dir}/outbox/ shaped {"type":"task-update","taskId":"<id>","kind":"doing|blocked|done|note","text":"one short line for the board"}. It is NOT a message (no recipient, no reply); the harness shows it on that task's card, and kind doing|blocked|done also moves the card into that column. Post one when you start, when you hit a blocker (say why), and when you finish.`,
+      `5. If a task you were given includes a [task:<id>] marker, report progress to the human by writing ONE JSON file into ${dir}/outbox/ shaped {"type":"task-update","taskId":"<id>","kind":"doing|blocked|needs-approval|done|note","text":"one short line for the board"}. It is NOT a message (no recipient, no reply); the harness shows it on that task's card, and kind doing|blocked|done also moves the card into that column. Use kind 'needs-approval' to park a task in the Needs Approval section for human sign-off (e.g. a plan-mode plan is ready). Post one when you start, when you hit a blocker (say why), and when you finish.`,
       skillsLine,
       memoryLine,
       godLine,
@@ -844,7 +849,8 @@ export class ProjectManager {
         ...t,
         updates: disk.updates ?? t.updates,                  // agent history always from disk
         status: diskNewer ? disk.status : t.status,          // most-recent status writer wins
-        statusUpdatedAt: diskNewer ? disk.statusUpdatedAt : t.statusUpdatedAt
+        statusUpdatedAt: diskNewer ? disk.statusUpdatedAt : t.statusUpdatedAt,
+        assignee: diskNewer ? disk.assignee : t.assignee     // an agent's fresh 'doing' claim (set with status) wins over a stale renderer copy; a human reassign (status unchanged) still wins via `...t`
       };
     });
     this.writeJson(join(root, 'tasks.json'), { tasks: merged });
@@ -864,11 +870,17 @@ export class ProjectManager {
     const task = data.tasks.find((t) => t.id === taskId);
     if (!task) { this.appendLog({ kind: 'task-update-miss', taskId, by }); return; }
     const kind: TaskUpdate['kind'] =
-      (['doing', 'blocked', 'done', 'note'] as const).includes(raw.kind as TaskUpdate['kind'])
+      (['doing', 'blocked', 'needs-approval', 'done', 'note'] as const).includes(raw.kind as TaskUpdate['kind'])
         ? (raw.kind as TaskUpdate['kind']) : 'note';
     const u: TaskUpdate = { ts: new Date().toISOString(), by, kind, text: String(raw.text ?? '').slice(0, 280) };
     task.updates = [...(task.updates ?? []), u].slice(-20);
     if (kind !== 'note') { task.status = kind; task.statusUpdatedAt = u.ts; } // auto-move the card
+    // A 'doing' update is the authoritative "I'm working this now" signal, so
+    // claim the task for its author (`by` = owning agent dir). Only on 'doing':
+    // leave assignee untouched on blocked/done/note (don't reassign on finish).
+    // Stamped together with statusUpdatedAt so writeTasks' recency guard keeps
+    // this claim from being reverted by a stale renderer write (see below).
+    if (kind === 'doing') { task.assignee = by; }
     this.writeJson(join(root, 'tasks.json'), data);
     this.appendLog({ kind: 'task-update', taskId, by, state: kind });
     this.emit?.('project:taskUpdated', { taskId, by, kind, text: u.text });

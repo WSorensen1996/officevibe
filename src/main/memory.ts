@@ -178,8 +178,8 @@ export class MemoryManager {
   // — recall (read) —
 
   /** Semantic search across the shared palace. Returns the CLI's text output.
-   *  `timeoutMs` lets interactive callers (e.g. enrich) cap the blocking spawnSync
-   *  so a slow/hung mempalace can't freeze the main thread for the full 120s. */
+   *  `timeoutMs` lets interactive callers cap the blocking spawnSync so a
+   *  slow/hung mempalace can't freeze the main thread for the full 120s. */
   search(query: string, opts: { wing?: string; results?: number; timeoutMs?: number } = {}): { ok: boolean; output: string; error?: string } {
     const bin = this.bin();
     if (!this.active() || !bin) return { ok: false, output: '', error: 'semantic memory not active' };

@@ -7,7 +7,7 @@
 export interface TaskUpdate {
   ts: string;
   by: string;
-  kind: 'doing' | 'blocked' | 'done' | 'note';
+  kind: 'doing' | 'blocked' | 'needs-approval' | 'done' | 'note';
   text: string;
 }
 
@@ -31,7 +31,7 @@ export interface ProjectTask {
   title: string;
   description?: string;
   assignee?: string;
-  status: 'todo' | 'doing' | 'blocked' | 'done';
+  status: 'todo' | 'doing' | 'blocked' | 'needs-approval' | 'done';
   dependsOn: string[];
   priority: number;
   createdAt: string;
@@ -54,6 +54,11 @@ export interface ProjectTask {
    *  `attachments/<id>/`; only these references persist here. Load-bearing in
    *  parseTasks's whitelist — drop it there and the 5s poll wipes attachments. */
   attachments?: TaskAttachment[];
+  /** Human-set: when true, dispatch tells the agent to PRODUCE A PLAN (not
+   *  implement) and park the task in NEEDS APPROVAL for sign-off (see
+   *  useTasks.dispatchTask). Round-trips via the writeTasks `...t` spread + the
+   *  parseTasks whitelist — drop it there and the 5s poll clears the flag. */
+  planMode?: boolean;
 }
 
 export type Status = ProjectTask['status'];
@@ -77,12 +82,23 @@ export const COLUMNS: { key: Status; label: string; accent: string }[] = [
   { key: 'done',    label: 'DONE',    accent: 'var(--cth-mint)' }
 ];
 
+/** 'needs-approval' is a first-class status but NOT a top-level column: it renders
+ *  as the TOP sub-section of the BLOCKED column (a waiting-for-human state — e.g. a
+ *  plan-mode agent parks its task here for sign-off). Kept out of COLUMNS so the
+ *  board stays 4 columns, but described here so the board sub-header, the per-card
+ *  lane <select>, and the detail-panel badge all share one label + accent. */
+export const NEEDS_APPROVAL: { key: Status; label: string; accent: string } = {
+  key: 'needs-approval', label: 'NEEDS APPROVAL', accent: 'var(--cth-lilac)'
+};
+
 export const POLL_MS = 5000;
 
 /** Accent per agent-reported update kind (matches the column accents). */
 export const UPDATE_COLOR: Record<TaskUpdate['kind'], string> = {
   doing: 'var(--cth-lemon)',
   blocked: 'var(--cth-coral)',
+  // Matches the NEEDS_APPROVAL sub-section accent so a plan-mode park reads lilac.
+  'needs-approval': 'var(--cth-lilac)',
   done: 'var(--cth-mint)',
   note: 'var(--cth-ink-500)'
 };
@@ -151,7 +167,7 @@ export function stableId(seed: string): string {
 /** Keep only well-formed agent updates (display-only; the harness owns the truth). */
 export function parseUpdates(raw: unknown): TaskUpdate[] | undefined {
   if (!Array.isArray(raw)) return undefined;
-  const kinds = ['doing', 'blocked', 'done', 'note'] as const;
+  const kinds = ['doing', 'blocked', 'needs-approval', 'done', 'note'] as const;
   const out = raw.filter((u): u is TaskUpdate =>
     !!u && typeof u === 'object'
     && typeof (u as TaskUpdate).text === 'string'
@@ -215,7 +231,7 @@ export function parseTasks(raw: unknown): ProjectTask[] {
       title: typeof t.title === 'string' ? t.title : '(untitled)',
       description: typeof t.description === 'string' ? t.description : undefined,
       assignee: typeof t.assignee === 'string' ? t.assignee : undefined,
-      status: (['todo', 'doing', 'blocked', 'done'] as const).includes(t.status as Status)
+      status: (['todo', 'doing', 'blocked', 'needs-approval', 'done'] as const).includes(t.status as Status)
         ? (t.status as Status) : 'todo',
       dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.filter((d): d is string => typeof d === 'string') : [],
       priority: typeof t.priority === 'number' ? t.priority : 3,
@@ -228,6 +244,8 @@ export function parseTasks(raw: unknown): ProjectTask[] {
       // Load-bearing: drop this on poll and the unread indicator never settles.
       viewedAt: typeof t.viewedAt === 'string' ? t.viewedAt : undefined,
       // Load-bearing: drop this on poll and the next human persist() wipes attachments.
-      attachments: parseAttachments(t.attachments)
+      attachments: parseAttachments(t.attachments),
+      // Load-bearing: drop this on poll and the 5s poll clears the plan-mode flag.
+      planMode: t.planMode === true ? true : undefined
     }));
 }

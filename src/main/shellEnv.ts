@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 // These helpers mirror the resolution logic in pty.ts. They exist separately so
-// headless child processes (e.g. the enrichment assistant) can launch `claude`
+// headless child processes (e.g. the curator) can launch `claude`
 // with the same PATH the user's interactive shell sees — Electron on macOS
 // starts without the login-shell PATH, so a bare `claude` would otherwise fail
 // with ENOENT in a packaged build.

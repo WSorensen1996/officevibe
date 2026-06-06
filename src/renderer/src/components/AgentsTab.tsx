@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useLayoutEffect } from 'react';
+import { useState } from 'react';
 import { AgentCard } from './AgentCard';
 import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
@@ -17,105 +17,36 @@ export function AgentsTab() {
   const toolCounts = useStore((s) => s.toolCounts);
   const { restartingId, restart } = useAgentRestart();
 
-  // ─── Horizontal scroll-strip plumbing ─────────────────────────────────────--
-  // The roster lays out as one full-width row; when there are more live agents
-  // than fit, the track scrolls horizontally and ◀/▶ step through it.
-  const trackRef = useRef<HTMLDivElement>(null);
-  const [canLeft, setCanLeft] = useState(false);
-  const [canRight, setCanRight] = useState(false);
-
-  const updateScroll = useCallback(() => {
-    const el = trackRef.current;
-    if (!el) return;
-    setCanLeft(el.scrollLeft > 1);
-    setCanRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
-  }, []);
-
-  // Recompute reachability when the roster changes or the strip is resized.
-  useLayoutEffect(() => {
-    updateScroll();
-    const el = trackRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(updateScroll);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [updateScroll, agents.length]);
-
-  const scrollByPage = (dir: number) => {
-    const el = trackRef.current;
-    if (!el) return;
-    // Step roughly a page, keeping one card of overlap for context.
-    el.scrollBy({ left: dir * Math.max(232, el.clientWidth - 232), behavior: 'smooth' });
-  };
-
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 12, background: 'var(--cth-paper-200)' }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-        <PixelButton
-          variant="secondary"
-          size="lg"
-          disabled={!canLeft}
-          onClick={() => scrollByPage(-1)}
-          style={{ flexShrink: 0 }}
-        >◀</PixelButton>
-
-        <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
-          <div
-            ref={trackRef}
-            onScroll={updateScroll}
-            style={{
-              display: 'flex', gap: 12, alignItems: 'flex-start',
-              overflowX: 'auto', overflowY: 'hidden',
-              paddingBottom: 6, scrollBehavior: 'smooth'
-            }}
-          >
-            {agents.map((a) => (
-              <AgentCard
-                key={a.id}
-                name={a.name}
-                character={a.character}
-                accent={a.accent}
-                status={a.status}
-                project={a.project}
-                action={a.action}
-                progress={a.progress}
-                selected={a.id === selectedId}
-                isGod={a.isGod}
-                isAssistant={a.isAssistant}
-                onClick={() => select(a.id)}
-                model={a.model}
-                effort={a.effort}
-                toolCalls={toolCounts[a.id] ?? 0}
-                restarting={restartingId === a.id}
-                canRestart={!!a.ptyId}
-                onPickModel={(m) => restart(a, { model: m })}
-                onPickEffort={(e) => restart(a, { effort: e })}
-                onRestart={() => restart(a, {})}
-              />
-            ))}
-          </div>
-          {/* Edge fades hint that cards continue off-screen. */}
-          {canLeft && (
-            <div style={{
-              position: 'absolute', top: 0, bottom: 6, left: 0, width: 28, pointerEvents: 'none', zIndex: 1,
-              background: 'linear-gradient(to right, var(--cth-paper-200), transparent)'
-            }} />
-          )}
-          {canRight && (
-            <div style={{
-              position: 'absolute', top: 0, bottom: 6, right: 0, width: 28, pointerEvents: 'none', zIndex: 1,
-              background: 'linear-gradient(to left, var(--cth-paper-200), transparent)'
-            }} />
-          )}
-        </div>
-
-        <PixelButton
-          variant="secondary"
-          size="lg"
-          disabled={!canRight}
-          onClick={() => scrollByPage(1)}
-          style={{ flexShrink: 0 }}
-        >▶</PixelButton>
+      {/* Cards fill the tab width: a wrapping flex row packs as many ~220px cards
+          per line as fit, then wraps. The container's overflowY (above) scrolls
+          the rows — no horizontal scroll. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' }}>
+        {agents.map((a) => (
+          <AgentCard
+            key={a.id}
+            name={a.name}
+            character={a.character}
+            accent={a.accent}
+            status={a.status}
+            project={a.project}
+            action={a.action}
+            progress={a.progress}
+            selected={a.id === selectedId}
+            isGod={a.isGod}
+            isAssistant={a.isAssistant}
+            onClick={() => select(a.id)}
+            model={a.model}
+            effort={a.effort}
+            toolCalls={toolCounts[a.id] ?? 0}
+            restarting={restartingId === a.id}
+            canRestart={!!a.ptyId}
+            onPickModel={(m) => restart(a, { model: m })}
+            onPickEffort={(e) => restart(a, { effort: e })}
+            onRestart={() => restart(a, {})}
+          />
+        ))}
       </div>
 
       <PixelButton

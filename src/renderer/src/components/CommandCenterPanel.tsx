@@ -207,7 +207,10 @@ function MemoryTab({ godId }: { godId: string }) {
   const canSearch = !!status?.available && !!status?.enabled;
 
   return (
-    <Scroll>
+    // Full-height flex column: the search/control sections keep their natural
+    // height while the MEMORY FILE viewer (below) grows to fill the leftover
+    // space instead of staying a small fixed-height window.
+    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 10, background: 'var(--cth-paper-200)', overflow: 'hidden' }}>
       <Section title="TEXT SEARCH (board, tasks, memory)">
         <div style={{ display: 'flex', gap: 6 }}>
           <input
@@ -326,13 +329,18 @@ function MemoryTab({ godId }: { godId: string }) {
         {searchOut && <Pre>{searchOut}</Pre>}
       </Section>
 
-      <Section title="MEMORY FILE">
+      {/* MEMORY FILE — flex:1 so it claims all remaining vertical space; the
+          viewer fills the area and scrolls internally on long memory files. */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 9, lineHeight: '12px', color: 'var(--cth-ink-500)', marginBottom: 6 }}>MEMORY FILE</div>
         <Select value={who} onChange={setWho}>
           {agents.map((a) => (<option key={a.id} value={a.id}>{a.name}</option>))}
         </Select>
-        <Pre>{mem || 'No memory recorded yet.'}</Pre>
-      </Section>
-    </Scroll>
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <Pre maxHeight="100%">{mem || 'No memory recorded yet.'}</Pre>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -478,7 +486,7 @@ const HANDBOOK: CmdGroup[] = [
     title: 'AUTOMATION (HEADLESS)',
     items: [
       { cmd: 'claude -p "your prompt"', kind: 'cli', desc: 'Print mode: run one prompt non-interactively and exit.' },
-      { cmd: 'claude -p "your prompt" --output-format json', kind: 'cli', desc: 'Headless with structured JSON output (result, usage, cost) — the mechanism behind enrichment.' },
+      { cmd: 'claude -p "your prompt" --output-format json', kind: 'cli', desc: 'Headless with structured JSON output (result, usage, cost).' },
       { cmd: 'claude -c -p "follow-up"', kind: 'cli', desc: 'Continue the last session headlessly with a follow-up prompt.' }
     ]
   },
@@ -580,9 +588,13 @@ export function Muted({ children }: { children: React.ReactNode }) {
  *  pass `'none'` for a block that grows with its container (e.g. the full-card
  *  detail view, which scrolls at the panel level instead). */
 export function Pre({ children, maxHeight = 200 }: { children: React.ReactNode; maxHeight?: number | string }) {
+  // When a caller opts into a percentage cap (e.g. maxHeight="100%"), also fill
+  // that height so the block expands to its container instead of shrinking to
+  // its content. Numeric callers (the default 200) keep their max-cap behavior.
+  const height = maxHeight === '100%' ? '100%' : undefined;
   return (
     <pre style={{
-      margin: '6px 0 0', padding: 8, maxHeight, overflow: 'auto',
+      margin: '6px 0 0', padding: 8, maxHeight, height, overflow: 'auto',
       background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
       fontFamily: 'var(--cth-font-mono)', fontSize: 12, lineHeight: '16px',
       color: 'var(--cth-ink-900)', whiteSpace: 'pre-wrap', wordBreak: 'break-word'

@@ -48,6 +48,7 @@ export function App() {
   const leftTab = useStore(s => s.leftTab);
   const setLeftTab = useStore(s => s.setLeftTab);
   const select = useStore(s => s.select);
+  const selectedId = useStore(s => s.selectedId);
   const openTaskId = useStore(s => s.openTaskId);
   const browserActive = useStore(s => s.browserActive);
   // Any agent blocked on a prompt lights the Messages-tab badge (the request lives
@@ -175,6 +176,43 @@ export function App() {
               tabs (terminal/files/messages/logs) are pointed at. */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
             <ProjectSwitcher config={config} />
+            {/* Active-agent strip: one compact clickable badge per agent in the
+                roster (archived agents live in a separate list, so this is the
+                active set). Click selects; the selected one gets an accent ring.
+                Scrolls horizontally so it never pushes the right-side chip off. */}
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              minWidth: 0, overflowX: 'auto', flex: '0 1 auto'
+            }}>
+              {agents.map((a) => (
+                <button
+                  key={a.id}
+                  type="button"
+                  title={a.name}
+                  onClick={() => select(a.id)}
+                  style={{
+                    flexShrink: 0,
+                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                    padding: 2, border: 'none', cursor: 'pointer',
+                    background: a.id === selectedId ? 'var(--cth-cream-200)' : 'transparent',
+                    boxShadow: a.id === selectedId
+                      ? 'inset 0 0 0 2px var(--cth-ink-900)'
+                      : 'inset 0 0 0 1px var(--cth-ink-300)'
+                  }}
+                >
+                  <div style={{
+                    width: 20, height: 24, flexShrink: 0,
+                    background: `var(--cth-${a.accent}-light)`,
+                    boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
+                    display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+                    overflow: 'hidden'
+                  }}>
+                    <SpritePortrait character={a.character} scale={1} />
+                  </div>
+                  <PixelBadge status={a.status} label="" />
+                </button>
+              ))}
+            </div>
             <div style={{ marginLeft: 'auto', minWidth: 0 }}>
               {agent ? (
                 <div

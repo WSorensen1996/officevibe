@@ -39,7 +39,7 @@ export interface AgentSay {
 export interface TaskUpdate {
   ts: string;
   by: string;
-  kind: 'doing' | 'blocked' | 'done' | 'note';
+  kind: 'doing' | 'blocked' | 'needs-approval' | 'done' | 'note';
   text: string;
 }
 
@@ -58,7 +58,7 @@ export interface ProjectTask {
   title: string;
   description?: string;
   assignee?: string;
-  status: 'todo' | 'doing' | 'blocked' | 'done';
+  status: 'todo' | 'doing' | 'blocked' | 'needs-approval' | 'done';
   dependsOn: string[];
   priority: number;
   createdAt: string;
@@ -76,6 +76,9 @@ export interface ProjectTask {
   viewedAt?: string;
   /** Files/images the human pasted or attached (binary on disk, refs only here). */
   attachments?: TaskAttachment[];
+  /** Human-set: dispatch tells the agent to plan (not implement) and park the
+   *  task in needs-approval for sign-off. Round-trips via the writeTasks spread. */
+  planMode?: boolean;
 }
 
 /** A message the router just delivered, with its resolved recipient ids. Drives
@@ -378,15 +381,6 @@ const api = {
   mineNow: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('project:mineNow'),
   projectSend: (msg: Partial<ProjectMessage>, from?: string): Promise<{ ok: boolean; error?: string; message?: ProjectMessage; delivered?: number }> =>
     ipcRenderer.invoke('project:send', msg, from),
-
-  // ─── Enrichment assistant (headless Sonnet 1M prompt prep for Michael) ─────
-  /** Run Michael's silent assistant on a raw message and return an enriched,
-   *  context-rich prompt. `cwd` is the agent's working directory (its default
-   *  context); the assistant may read every registered repo to gather more.
-   *  `mode: 'task'` returns a self-contained task description instead of a
-   *  Michael-addressed prompt (used by the Kanban task form). */
-  enrichMessage: (req: { message: string; cwd: string; mode?: 'message' | 'task' }): Promise<{ ok: boolean; prompt?: string; error?: string; memoryUnavailable?: boolean }> =>
-    ipcRenderer.invoke('assistant:enrich', req),
   onProjectHookEvent: (
     cb: (e: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string; message?: string; blocked?: boolean }) => void
   ): (() => void) => {

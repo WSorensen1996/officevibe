@@ -18,7 +18,6 @@ import { HookServer } from './hooks';
 import { MemoryManager } from './memory';
 import { KnowledgeManager } from './knowledge';
 import { Curator } from './curator';
-import { enrichMessage } from './assistant';
 import { readAgentUsage } from './transcript';
 import { SlackWebhookServer } from './slack';
 import { startBrowserMcp, type BrowserMcpHandle } from './browserMcp';
@@ -958,53 +957,6 @@ ipcMain.handle('project:switch', (_evt, path: unknown) => {
   if (typeof path !== 'string' || !path) return { ok: false, error: 'invalid path' };
   switchToProjectAndRelaunch(path, { name: deriveProjectName(path), path });
   return { ok: true, path };
-});
-
-// ─── IPC: enrichment assistant (headless prompt prep, subscription default model) ───
-ipcMain.handle('assistant:enrich', async (_evt, payload: unknown) => {
-  const p = (payload ?? {}) as { message?: unknown; cwd?: unknown; mode?: unknown };
-  if (typeof p.message !== 'string' || !p.message.trim()) {
-    return { ok: false, error: 'empty message' };
-  }
-  const cfg = readConfig();
-  const cwd = typeof p.cwd === 'string' && p.cwd ? p.cwd : cfg.activeProjectPath;
-  if (!cwd) return { ok: false, error: 'no working directory available' };
-  const mode = p.mode === 'task' ? 'task' : 'message';
-
-  // Task enrich no longer explores the repo — it rewrites from the team's
-  // MemPalace memories. Fetch the most relevant ones here (short timeout so a
-  // slow mempalace can't freeze the main thread). If memory is off/empty we
-  // still enrich, just from the user's intent alone (see buildTaskDescriptionPrompt).
-  let memories: string | undefined;
-  let memoryUnavailable = false;
-  if (mode === 'task') {
-    if (memory.status().active) {
-      const r = memory.search(p.message, { results: 8, timeoutMs: 10_000 });
-      if (r.ok && r.output.trim()) memories = r.output;
-      else memoryUnavailable = true;
-    } else {
-      memoryUnavailable = true;
-    }
-  }
-
-  try {
-    const res = await enrichMessage({
-      message: p.message,
-      cwd,
-      repos: cfg.registeredRepos ?? [],
-      command: cfg.defaultCommand,
-      // Only used by the legacy 'message' path now; 'task' is pinned to a fast
-      // model inside enrichMessage. Unset → no --model flag → CLI default.
-      model: cfg.defaultModel,
-      env: memory.env(),
-      mode,
-      memories
-    });
-    // Soft, non-fatal signal so the UI can note that no memories were used.
-    return memoryUnavailable ? { ...res, memoryUnavailable: true } : res;
-  } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
 });
 
 // ─── IPC: semantic memory (MemPalace CLI) ───────────────────────────────────

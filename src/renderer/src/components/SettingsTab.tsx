@@ -3,7 +3,6 @@ import { type HarnessConfig, type EffortLevel, AGENT_EFFORTS } from '@/store/con
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import { ProjectSwitcher } from './ProjectSwitcher';
-import { useStore } from '@/store/store';
 
 /** Settings as a Command-Center tab. Lifted out of the old SettingsModal so the
  *  app no longer needs a title-bar gear: same controls (config summary, desktop
@@ -134,11 +133,6 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
     try { await window.cth.setNotifications(next); }
     catch { setNotifications(!next); /* revert on failure */ }
   };
-
-  // ─── Assistant enrichment (store-backed; persisted to localStorage) ─────────
-  // Relocated from the old Floor tab's ASSISTANT section.
-  const enrichEnabled = useStore((s) => s.enrichEnabled);
-  const setEnrichEnabled = useStore((s) => s.setEnrichEnabled);
 
   // ─── Auto-pilot on startup ─────────────────────────────────────────────────
   const [autoPilot, setAutoPilot] = useState<boolean>(config.autoPilot === true);
@@ -418,15 +412,6 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
           caption="Native toasts when an agent finishes or needs your input."
           on={notifications}
           onToggle={toggleNotifications}
-        />
-      </Section>
-
-      <Section title="ASSISTANT">
-        <ToggleRow
-          title="Enrich Michael's queue"
-          caption="Route Michael's queue through Dwight to enrich prompts with project context before delivery."
-          on={enrichEnabled}
-          onToggle={() => setEnrichEnabled(!enrichEnabled)}
         />
       </Section>
 

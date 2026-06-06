@@ -13,6 +13,7 @@ import {
   type ScheduledMission,
   type ScheduleSpec,
   COLUMNS,
+  NEEDS_APPROVAL,
   UPDATE_COLOR,
   INTERVAL_OPTS,
   intervalLabel,
@@ -43,6 +44,7 @@ export function TasksKanban() {
     missionFor,
     deleteTask,
     moveTask,
+    setPriority,
     archiveTask,
     archiveAllDone,
     unarchiveTask,
@@ -57,6 +59,22 @@ export function TasksKanban() {
   // columns and the toolbar count only ever see the active set.
   const active = tasks.filter((t) => !t.archived);
   const archived = tasks.filter((t) => t.archived);
+
+  // One card-wiring shared by the normal column bodies and the BLOCKED column's
+  // two stacked sub-sections (NEEDS APPROVAL + BLOCKED), so they stay identical.
+  const renderCard = (t: ProjectTask) => (
+    <TaskCard
+      key={t.id}
+      task={t}
+      assigneeName={nameFor(t.assignee)}
+      mission={missionFor(t.id)}
+      onMove={(s) => moveTask(t.id, s)}
+      onSetPriority={(p) => setPriority(t.id, p)}
+      onDispatch={() => dispatchTask(t)}
+      onArchive={() => archiveTask(t.id)}
+      onEdit={() => openTask(t.id)}
+    />
+  );
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--cth-paper-200)' }}>
@@ -90,6 +108,33 @@ export function TasksKanban() {
           const unread = cards.filter(isTaskUnread).length;
           // TODO column only: how many todos haven't been dispatched yet (drives DISPATCH ALL).
           const undispatched = col.key === 'todo' ? cards.filter((t) => !t.dispatchedAt).length : 0;
+          // The BLOCKED column is split in half into two stacked, independently
+          // scrolling sub-sections: NEEDS APPROVAL (waiting-for-human, e.g. a
+          // plan-mode sign-off) on top, then BLOCKED below. needs-approval is a
+          // first-class status, not a 5th column (see NEEDS_APPROVAL in taskShared).
+          if (col.key === 'blocked') {
+            const approvalCards = active.filter((t) => t.status === 'needs-approval');
+            return (
+              <div key={col.key} style={{
+                flex: '1 1 0', minWidth: 170, display: 'flex', flexDirection: 'column',
+                background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
+              }}>
+                <ColumnSubSection
+                  label={NEEDS_APPROVAL.label}
+                  accent={NEEDS_APPROVAL.accent}
+                  cards={approvalCards}
+                  renderCard={renderCard}
+                />
+                <div style={{ height: 2, flexShrink: 0, background: 'var(--cth-ink-300)' }} />
+                <ColumnSubSection
+                  label={col.label}
+                  accent={col.accent}
+                  cards={cards}
+                  renderCard={renderCard}
+                />
+              </div>
+            );
+          }
           return (
             <div key={col.key} style={{
               flex: '1 1 0', minWidth: 170, display: 'flex', flexDirection: 'column',
@@ -152,18 +197,7 @@ export function TasksKanban() {
                 {cards.length === 0 && (
                   <div style={{ fontSize: 12, color: 'var(--cth-ink-300)', textAlign: 'center', padding: '8px 0' }}>—</div>
                 )}
-                {cards.map((t) => (
-                  <TaskCard
-                    key={t.id}
-                    task={t}
-                    assigneeName={nameFor(t.assignee)}
-                    mission={missionFor(t.id)}
-                    onMove={(s) => moveTask(t.id, s)}
-                    onDispatch={() => dispatchTask(t)}
-                    onArchive={() => archiveTask(t.id)}
-                    onEdit={() => openTask(t.id)}
-                  />
-                ))}
+                {cards.map(renderCard)}
               </div>
             </div>
           );
@@ -171,6 +205,49 @@ export function TasksKanban() {
       </div>
 
       <ArchivedTasksSection tasks={archived} onRestore={unarchiveTask} onDelete={deleteTask} />
+    </div>
+  );
+}
+
+// ─── Column sub-section — one labelled, independently-scrolling list inside a
+//     column. Used to split the BLOCKED column into NEEDS APPROVAL (top) +
+//     BLOCKED (bottom); each gets its own accent header, unread badge, count,
+//     and empty-state. Mirrors the normal column header/body styling. ──────────-
+
+function ColumnSubSection({ label, accent, cards, renderCard }: {
+  label: string;
+  accent: string;
+  cards: ProjectTask[];
+  renderCard: (t: ProjectTask) => React.ReactNode;
+}) {
+  const unread = cards.filter(isTaskUnread).length;
+  return (
+    <div style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6, padding: '5px 8px 4px', flexShrink: 0,
+        background: accent, boxShadow: 'inset 0 -1px 0 var(--cth-ink-900)',
+        fontFamily: 'var(--cth-font-display)', fontSize: 9, color: 'var(--cth-ink-900)'
+      }}>
+        {label}
+        {unread > 0 && (
+          <span
+            title={`${unread} unread`}
+            style={{
+              marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              minWidth: 14, height: 14, padding: '0 4px',
+              background: 'var(--cth-coral)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
+              fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-900)'
+            }}
+          >{unread}</span>
+        )}
+        <span style={{ marginLeft: unread > 0 ? 4 : 'auto', fontSize: 11, fontFamily: 'var(--cth-font-ui)' }}>{cards.length}</span>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {cards.length === 0 && (
+          <div style={{ fontSize: 12, color: 'var(--cth-ink-300)', textAlign: 'center', padding: '8px 0' }}>—</div>
+        )}
+        {cards.map(renderCard)}
+      </div>
     </div>
   );
 }
@@ -255,11 +332,12 @@ function ArchivedTaskRow({ task, onRestore, onDelete }: {
 
 // ─── Card ────────────────────────────────────────────────────────────────────
 
-function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, onEdit }: {
+function TaskCard({ task, assigneeName, mission, onMove, onSetPriority, onDispatch, onArchive, onEdit }: {
   task: ProjectTask;
   assigneeName?: string;
   mission?: ScheduledMission;
   onMove: (s: Status) => void;
+  onSetPriority: (p: number) => void;
   onDispatch: () => void;
   onArchive: () => void;
   onEdit: () => void;
@@ -354,6 +432,15 @@ function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, 
         {assigneeName
           ? <PixelBadge status="working" label={assigneeName} />
           : <span style={{ fontSize: 11, color: 'var(--cth-ink-300)' }}>unassigned</span>}
+        {task.planMode && (
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 6px 0',
+            background: 'var(--cth-lilac)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
+            fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-900)'
+          }} title="Plan mode — agent plans only, then parks in Needs Approval">
+            <Icon name="sparkle" /> PLAN
+          </span>
+        )}
         {task.dependsOn.length > 0 && (
           <span style={{
             display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 6px 0',
@@ -396,7 +483,33 @@ function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, 
           }}
         >
           {COLUMNS.map((c) => (<option key={c.key} value={c.key}>{c.label.toLowerCase()}</option>))}
+          {/* needs-approval has no column of its own — it lives in the BLOCKED
+              column's top sub-section, so append it as an extra lane option. */}
+          <option value={NEEDS_APPROVAL.key}>{NEEDS_APPROVAL.label.toLowerCase()}</option>
         </select>
+        {/* Inline priority (1-5), editable straight from the board — mirrors the
+            form's priority picker. Tiny 'P' label + compact select, matching the
+            lane select's styling. */}
+        <span
+          title={`Priority ${pr}/5`}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 3, flexShrink: 0,
+            fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-500)'
+          }}
+        >
+          P
+          <select
+            value={pr}
+            onChange={(e) => onSetPriority(Number(e.target.value))}
+            style={{
+              width: 'auto', minWidth: 0, padding: '2px 4px', background: 'var(--cth-paper-100)', border: 'none',
+              boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)',
+              fontSize: 11, color: 'var(--cth-ink-900)', cursor: 'pointer'
+            }}
+          >
+            {[1, 2, 3, 4, 5].map((p) => (<option key={p} value={p}>{p}</option>))}
+          </select>
+        </span>
         {canDispatch && (
           <PixelButton variant="primary" size="sm" onClick={onDispatch}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
@@ -571,6 +684,9 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   const [priority, setPriority] = useState(initial?.priority ?? draft0?.priority ?? 3);
   const [deps, setDeps] = useState<string[]>(initial?.dependsOn ?? draft0?.deps ?? seed?.dependsOn ?? []);
   const [status, setStatus] = useState<Status>(initial?.status ?? 'todo');
+  // Plan mode: when dispatched, the agent produces a PLAN (not an implementation)
+  // and parks the task in Needs Approval for sign-off (see useTasks.dispatchBody).
+  const [planMode, setPlanMode] = useState<boolean>(initial?.planMode ?? draft0?.planMode ?? false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   // Dispatch is offered only for not-yet-running tasks (mirrors the board card),
   // and hidden once an existing card has been dispatched until its status next
@@ -591,11 +707,6 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   const [schedEnabled, setSchedEnabled] = useState(
     initialMission?.mode === 'recurring' ? initialMission.enabled : true
   );
-  // Enrich: the read-only assistant rewrites the description into a concrete,
-  // self-contained task. `preEnrich` stashes the prior text for a single undo.
-  const [enriching, setEnriching] = useState(false);
-  const [preEnrich, setPreEnrich] = useState<string | null>(null);
-  const [enrichError, setEnrichError] = useState<string | null>(null);
 
   // Attachments: pasted images + attached files. A CREATE-mode draft mints a
   // stable id ONCE (lazy initializer, restored from the draft on a tab-flick
@@ -646,8 +757,8 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   const removeAttachment = (path: string) =>
     setAttachments((prev) => prev.filter((a) => a.path !== path));
 
-  // Programmatic setDescription() (enrich/undo/dictation) updates the controlled
-  // textarea's value, but the new text isn't *painted* until the user interacts:
+  // Programmatic setDescription() (dictation) updates the controlled textarea's
+  // value, but the new text isn't *painted* until the user interacts:
   // the Pixi WebGL canvas (scene/office) runs a continuous ticker on its own
   // compositor layer, and Chromium/Electron doesn't flush the textarea's layer
   // after a non-input-driven update. Focusing on the next frame (plus a reflow
@@ -677,7 +788,8 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
     createdAt: initial?.createdAt ?? new Date().toISOString(),
     // Carry the archive flag through an edit so saving the form can't un-archive.
     archived: initial?.archived,
-    attachments: attachments.length ? attachments : undefined
+    attachments: attachments.length ? attachments : undefined,
+    planMode: planMode || undefined
   });
 
   const buildSchedule = (): ScheduleSpec => {
@@ -696,8 +808,8 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   // a left-tab switch (read back by `draft0` on remount). No-op while editing.
   useEffect(() => {
     if (editing) return;
-    setTaskDraft({ title, description, assignee, priority, deps, id: createId, attachments });
-  }, [editing, setTaskDraft, title, description, assignee, priority, deps, createId, attachments]);
+    setTaskDraft({ title, description, assignee, priority, deps, id: createId, attachments, planMode });
+  }, [editing, setTaskDraft, title, description, assignee, priority, deps, createId, attachments, planMode]);
 
   // The title is optional when CREATING — a new task just needs *something*
   // (a title or a description), and a blank title is derived from the description
@@ -714,47 +826,10 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   // (Enter in the title, or ⌘/Ctrl+Enter anywhere in the form); EDIT mode has no
   // dispatch-on-create, so it falls back to saving.
   const submitPrimary = () => {
-    if (!canSubmit || enriching) return;
+    if (!canSubmit) return;
     if (!editing && onCreateAndDispatch) onCreateAndDispatch(buildTask(), buildSchedule());
     else submit();
   };
-
-  // Send the task intent (title + description) to the headless assistant and
-  // replace the description with the returned, context-rich version. cwd is left
-  // empty so the main process falls back to the active project directory.
-  const enrich = useCallback(async () => {
-    if (enriching) return; // re-entrancy guard
-    const t = title.trim();
-    const d = description.trim();
-    if (!t && !d) { setEnrichError('add a title or description first'); return; }
-    const message = t && d ? `${t}\n\n${d}` : (t || d);
-    setEnriching(true);
-    setEnrichError(null);
-    try {
-      const res = await window.cth.enrichMessage({ message, cwd: '', mode: 'task' });
-      if (res.ok && res.prompt) {
-        setPreEnrich(description); // stash current text for undo
-        setDescription(res.prompt);
-        nudgeRepaint(); // force the textarea layer to repaint (see nudgeRepaint)
-        // Soft note: enrich still ran, just without team memories as context.
-        setEnrichError(res.memoryUnavailable ? 'enriched without team memories (memory unavailable)' : null);
-      } else {
-        setEnrichError(res.error || 'enrich failed');
-      }
-    } catch (e) {
-      setEnrichError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setEnriching(false);
-    }
-  }, [enriching, title, description, nudgeRepaint]);
-
-  const undoEnrich = useCallback(() => {
-    if (preEnrich === null) return;
-    setDescription(preEnrich);
-    nudgeRepaint(); // same repaint quirk as enrich — show the restored text now
-    setPreEnrich(null);
-    setEnrichError(null);
-  }, [preEnrich, nudgeRepaint]);
 
   const toggleDep = (id: string) => {
     setDeps((d) => (d.includes(id) ? d.filter((x) => x !== id) : [...d, id]));
@@ -810,9 +885,7 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
           <textarea
             ref={textareaRef}
             value={description}
-            // Manually editing the enriched text retires the undo — restoring an
-            // ambiguous "previous" version would be surprising after hand-edits.
-            onChange={(e) => { setDescription(e.target.value); if (preEnrich !== null) setPreEnrich(null); }}
+            onChange={(e) => setDescription(e.target.value)}
             // Paste an image from the clipboard to attach it. Only intercept when
             // the clipboard actually holds image files — plain text paste flows
             // through to the textarea untouched.
@@ -830,41 +903,6 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
           />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'stretch', flexShrink: 0 }}>
             <MicButton onTranscript={(t) => { setDescription((p) => (p ? `${p} ${t}` : t)); nudgeRepaint(); }} />
-            <button
-              type="button"
-              onClick={enrich}
-              disabled={enriching || (!title.trim() && !description.trim())}
-              title={enriching
-                ? 'Enriching — rewriting from team memories into a concrete task description (fast)'
-                : 'Enrich — rewrite this into a concrete, self-contained task description'}
-              style={{
-                height: 30, padding: '0 8px',
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                border: 'none', cursor: enriching ? 'progress' : 'pointer',
-                background: enriching ? 'var(--cth-lemon)' : 'var(--cth-cream-100)',
-                color: 'var(--cth-ink-900)',
-                boxShadow: enriching
-                  ? 'inset 0 0 0 2px var(--cth-ink-900), 0 2px 0 var(--cth-ink-900)'
-                  : 'inset 0 0 0 2px var(--cth-ink-700), 0 2px 0 var(--cth-ink-700)',
-                opacity: (enriching || (!title.trim() && !description.trim())) ? 0.6 : 1,
-                fontFamily: 'var(--cth-font-ui)', fontSize: 13
-              }}
-            >
-              <Icon name="sparkle" /> {enriching ? 'enriching…' : 'enrich'}
-            </button>
-            {preEnrich !== null && !enriching && (
-              <button
-                type="button"
-                onClick={undoEnrich}
-                title="Undo enrich — restore the previous description"
-                style={{
-                  height: 22, border: 'none', cursor: 'pointer',
-                  background: 'var(--cth-cream-200)', color: 'var(--cth-ink-700)',
-                  boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
-                  fontFamily: 'var(--cth-font-ui)', fontSize: 11
-                }}
-              >undo</button>
-            )}
             {/* Attach files via a hidden picker (paste/drag also work). */}
             <button
               type="button"
@@ -894,9 +932,6 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
             />
           </div>
         </div>
-        {enrichError && (
-          <div style={{ fontSize: 11, lineHeight: '14px', color: 'var(--cth-coral)' }}>{enrichError}</div>
-        )}
         {attachError && (
           <div style={{ fontSize: 11, lineHeight: '14px', color: 'var(--cth-coral)' }}>attach failed: {attachError}</div>
         )}
@@ -927,10 +962,28 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
               <label style={labelStyle}>status</label>
               <select value={status} onChange={(e) => setStatus(e.target.value as Status)} style={selectStyle}>
                 {COLUMNS.map((c) => (<option key={c.key} value={c.key}>{c.label.toLowerCase()}</option>))}
+                {/* needs-approval lives in the BLOCKED column's top sub-section,
+                    not its own column — offer it as an extra lane option. */}
+                <option value={NEEDS_APPROVAL.key}>{NEEDS_APPROVAL.label.toLowerCase()}</option>
               </select>
             </>
           )}
         </div>
+
+        {/* Plan mode: dispatch tells the agent to PLAN (not implement), then park
+            the task in Needs Approval for sign-off (mirrors AddAgentModal's
+            isolate checkbox). */}
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={planMode}
+            onChange={(e) => setPlanMode(e.target.checked)}
+            style={{ width: 16, height: 16, cursor: 'pointer' }}
+          />
+          <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-900)' }}>
+            Plan mode — agent plans only, then parks in Needs Approval
+          </span>
+        </label>
 
         {existing.length > 0 && (
           <div>
@@ -1036,7 +1089,7 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
         </div>
 
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <PixelButton variant="primary" size="sm" onClick={submit} disabled={!canSubmit || enriching}>
+          <PixelButton variant="primary" size="sm" onClick={submit} disabled={!canSubmit}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
               <Icon name="check" /> {editing ? 'save' : 'create'}
             </span>
@@ -1053,7 +1106,7 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
               variant="primary"
               size="sm"
               onClick={() => { if (canSubmit) onCreateAndDispatch(buildTask(), buildSchedule()); }}
-              disabled={!canSubmit || enriching}
+              disabled={!canSubmit}
             >
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
                 <Icon name="arrow-right" /> create &amp; dispatch

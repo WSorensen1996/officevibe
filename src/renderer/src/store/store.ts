@@ -78,8 +78,8 @@ export interface Agent {
   lastPrompt?: string;
   /** the orchestrator ("god") agent — seated in Michael's room, runs the floor */
   isGod?: boolean;
-  /** Michael's prep assistant ("Dwight") — enriches prompts and forwards them to
-   *  Michael via the hive. Send-only: never receives inbox/broadcast mail. */
+  /** Michael's silent prep assistant ("Dwight"). Send-only: never receives
+   *  inbox/broadcast mail. */
   isAssistant?: boolean;
   /** When git isolation is enabled, the dedicated worktree path the agent runs
    *  in (its own `agent/<id>` branch); undefined for shared-cwd agents. */
@@ -92,8 +92,7 @@ export interface Agent {
 
 /** A message the user has parked for an agent while its terminal was busy.
  *  Queued messages are drained one at a time when the agent next goes idle (see
- *  useProject's flush loop). For Michael's queue the enrich toggle decides whether
- *  each one is typed into Michael directly or routed through the assistant. */
+ *  useProject's flush loop). */
 export interface QueuedMessage {
   id: string;
   text: string;
@@ -139,6 +138,8 @@ export interface TaskDraft {
   id?: string;
   /** Attachments added before the task is created (survive the same tab flick). */
   attachments?: TaskAttachment[];
+  /** Plan-mode flag, preserved across a tab flick like the other draft fields. */
+  planMode?: boolean;
 }
 
 /** The left tabs that render the selected agent's workspace (vs the shared
@@ -196,11 +197,6 @@ interface State {
    *  Lets the user keep "talking" to a busy agent: messages park here and are
    *  drained to the terminal one-by-one once the agent is free. */
   messageQueues: Record<string, QueuedMessage[]>;
-  /** Global toggle: when on, messages queued for Michael are routed through the
-   *  assistant ("Dwight") to be enriched with context before reaching Michael;
-   *  when off, they're typed straight into Michael. */
-  enrichEnabled: boolean;
-  setEnrichEnabled: (on: boolean) => void;
   /** Has the user engaged the floor this session (dispatched/queued a task)?
    *  Transient (not persisted) — starts false every launch. When auto-pilot is
    *  off, the inbox wake-nudge stays silent until this flips true, keeping
@@ -258,7 +254,6 @@ const LS_AGENTS = 'cth.agents';
 const LS_ARCHIVED = 'cth.archivedAgents';
 const LS_SELECTED = 'cth.selectedId';
 const LS_QUEUES = 'cth.messageQueues';
-const LS_ENRICH = 'cth.enrichEnabled';
 
 // Fields that are large or transient — not worth persisting across reloads.
 type PersistedAgent = Omit<Agent, 'recentAssistantText' | 'recentTextTs' | 'blockReason'>;
@@ -388,9 +383,6 @@ const initialAgents = loadPersistedAgents();
 const initialArchivedAgents = loadPersistedArchived();
 const initialSelectedId = loadPersistedSelectedId(initialAgents);
 const initialQueues = loadPersistedQueues();
-const initialEnrichEnabled: boolean = (() => {
-  try { return window.localStorage.getItem(LS_ENRICH) === '1'; } catch { return false; }
-})();
 
 let queuedSeq = 0;
 /** Process-unique id for a queued message (timestamp + counter avoids collisions
@@ -418,11 +410,6 @@ export const useStore = create<State>((set) => ({
   browserPinnedAgentId: null,
   godStatus: 'booting',
   messageQueues: initialQueues,
-  enrichEnabled: initialEnrichEnabled,
-  setEnrichEnabled: (on) => {
-    try { window.localStorage.setItem(LS_ENRICH, on ? '1' : '0'); } catch { /* noop */ }
-    set({ enrichEnabled: on });
-  },
   floorStarted: false,
   startFloor: () => set({ floorStarted: true }),
   toolCounts: {},

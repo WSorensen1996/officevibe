@@ -9,7 +9,6 @@ import { type AccentColorName } from '@/design/tokens';
 import { type HarnessConfig, type EffortLevel, buildSpawnCommand, AGENT_MODELS, AGENT_EFFORTS } from '@/store/config';
 
 const ACCENTS: AccentColorName[] = ['coral', 'mint', 'sky', 'lemon', 'lilac', 'peach'];
-const MAX_AGENT_COUNT = 12;
 
 function basename(path: string): string {
   return path.split('/').filter(Boolean).pop() ?? path;
@@ -28,14 +27,34 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
   const addAgent = useStore(s => s.addAgent);
   const agents = useStore(s => s.agents);
 
-  // Name is derived from the chosen character — the editable Name field was
-  // removed as redundant (the character's displayName already names the agent),
-  // but the hive/store entry still needs a name, so we keep it in state and let
-  // the character picker set it. Default it from DEFAULT_CHARACTER so it stays
-  // in sync rather than hardcoding a string.
-  const defaultName = OFFICE_CAST.find((c) => c.name === DEFAULT_CHARACTER)?.displayName ?? 'Agent';
-  const [name, setName] = useState(defaultName);
-  const [character, setCharacter] = useState<OfficeCharacterName>(DEFAULT_CHARACTER);
+  // Each character can be on the floor only once. The active roster already
+  // includes god (michael) + its assistant (dwight); archived agents are a
+  // separate list, so they correctly free their character back up.
+  const used = new Set(agents.map((a) => a.character));
+  const allTaken = OFFICE_CAST.every((c) => used.has(c.name));
+
+  // Character picker is multi-select: one agent is spawned per chosen character,
+  // each named after that character's displayName (the editable Name field was
+  // removed as redundant). Default to DEFAULT_CHARACTER if it's free, else the
+  // first un-taken character — so the modal opens with exactly one valid pick
+  // (or none, if every character is already in use).
+  const [selected, setSelected] = useState<Set<OfficeCharacterName>>(() => {
+    const taken = new Set(agents.map((a) => a.character));
+    const first = !taken.has(DEFAULT_CHARACTER)
+      ? DEFAULT_CHARACTER
+      : OFFICE_CAST.find((c) => !taken.has(c.name))?.name;
+    return new Set(first ? [first] : []);
+  });
+  const toggleCharacter = (name: OfficeCharacterName) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+  const selectedCount = selected.size;
+
   const [accent, setAccent] = useState<AccentColorName>('sky');
   // Default the folder to the one other agents already run in, so adding a
   // second/third agent lands in the same project without re-picking. We take
@@ -67,8 +86,6 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
   const [isolate, setIsolate] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
-  // How many agents to spawn in one go — all share the settings chosen above.
-  const [count, setCount] = useState(1);
 
   const pickFolder = async () => {
     setError(undefined);
@@ -79,23 +96,27 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
 
   const submit = async () => {
     setError(undefined);
-    if (!name.trim()) { setError('Name is required'); return; }
+    // One agent per selected character; re-filter against `used` so a character
+    // that got taken while the modal was open can't slip through.
+    const chosen = OFFICE_CAST.filter((c) => selected.has(c.name) && !used.has(c.name));
+    if (chosen.length === 0) { setError('Pick at least one character'); return; }
     if (!cwd) { setError('Pick a folder first'); return; }
     if (!command.trim()) { setError('Command is required'); return; }
 
-    const n = Math.max(1, Math.min(MAX_AGENT_COUNT, Math.floor(count) || 1));
-    const baseName = name.trim();
     // The command field contains `claude --permission-mode bypassPermissions`
     // for auto mode. Split into argv-style for node-pty.
     const [exe, ...args] = command.trim().split(/\s+/);
 
     setBusy(true);
-    // Spawn N identical agents sequentially so their ids/ptys never race. Each
-    // gets a freshly-derived unique id; when n>1 we also append the loop index,
-    // since uniqueId() is seeded by Date.now() which can repeat within a tight
-    // synchronous loop. All other settings are shared across the N.
-    for (let i = 0; i < n; i++) {
-      const id = n > 1 ? `${uniqueId(baseName)}-${i + 1}` : uniqueId(baseName);
+    // Spawn one agent per chosen character sequentially so their ids/ptys never
+    // race. Each agent is named after its character's displayName; the unique id
+    // is derived from that name (+ loop index, since uniqueId() seeds off
+    // Date.now() which can repeat within a tight synchronous loop). All other
+    // settings (folder/model/effort/description/goal/isolate) are shared.
+    for (let i = 0; i < chosen.length; i++) {
+      const c = chosen[i];
+      const agentName = c.displayName;
+      const id = chosen.length > 1 ? `${uniqueId(agentName)}-${i + 1}` : uniqueId(agentName);
       const ptyId = `pty-${id}`;
       const spawnRes = await window.cth.spawnPty({
         id: ptyId,
@@ -109,7 +130,7 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
         // Provision this agent in the hive (memory + mailbox + identity/protocol).
         hive: {
           id,
-          name: baseName,
+          name: agentName,
           cwd,
           role: description.trim() || undefined
         }
@@ -117,8 +138,8 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
       if (!spawnRes.ok) {
         setBusy(false);
         setError(
-          n > 1
-            ? `spawned ${i} of ${n}; agent #${i + 1} failed: ${spawnRes.error ?? 'spawn failed'}`
+          chosen.length > 1
+            ? `spawned ${i} of ${chosen.length}; agent #${i + 1} (${agentName}) failed: ${spawnRes.error ?? 'spawn failed'}`
             : (spawnRes.error ?? 'spawn failed')
         );
         return;
@@ -126,8 +147,8 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
 
       const agent: Agent = {
         id,
-        name: baseName,
-        character,
+        name: agentName,
+        character: c.name,
         accent,
         description: description.trim() || 'a fresh harness',
         project: basename(cwd),
@@ -311,30 +332,39 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
               </span>
             </label>
 
-            <Row label="Character">
+            <Row label="Character (pick one or more)">
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {OFFICE_CAST.map(c => (
-                  <button
-                    key={c.name}
-                    onClick={() => { setCharacter(c.name); setName(c.displayName); }}
-                    title={c.blurb}
-                    style={{
-                      padding: 4,
-                      background: character === c.name ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
-                      boxShadow: character === c.name
-                        ? 'inset 0 0 0 2px var(--cth-ink-900)'
-                        : 'inset 0 0 0 1px var(--cth-ink-700)',
-                      cursor: 'pointer',
-                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
-                      border: 'none', width: 56
-                    }}
-                  >
-                    <div style={{ width: 44, height: 56, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden' }}>
-                      <SpritePortrait character={c.name} scale={2} />
-                    </div>
-                    <span style={{ fontSize: 11, color: 'var(--cth-ink-700)' }}>{c.displayName}</span>
-                  </button>
-                ))}
+                {OFFICE_CAST.map(c => {
+                  const isSelected = selected.has(c.name);
+                  const isTaken = used.has(c.name);
+                  return (
+                    <button
+                      key={c.name}
+                      disabled={isTaken}
+                      onClick={() => toggleCharacter(c.name)}
+                      title={isTaken ? `${c.displayName} — already on the floor` : c.blurb}
+                      style={{
+                        padding: 4,
+                        background: isSelected ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
+                        boxShadow: isSelected
+                          ? 'inset 0 0 0 2px var(--cth-ink-900)'
+                          : 'inset 0 0 0 1px var(--cth-ink-700)',
+                        cursor: isTaken ? 'not-allowed' : 'pointer',
+                        opacity: isTaken ? 0.4 : 1,
+                        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+                        border: 'none', width: 56
+                      }}
+                    >
+                      <div style={{ width: 44, height: 56, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden' }}>
+                        <SpritePortrait character={c.name} scale={2} />
+                      </div>
+                      <span style={{ fontSize: 11, color: 'var(--cth-ink-700)' }}>{c.displayName}</span>
+                      {isTaken && (
+                        <span style={{ fontSize: 9, color: 'var(--cth-ink-500)' }}>taken</span>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
             </Row>
 
@@ -359,35 +389,6 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
               </div>
             </Row>
 
-            <Row label="Count">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <PixelButton
-                  variant="secondary"
-                  size="md"
-                  disabled={busy || count <= 1}
-                  onClick={() => setCount((c) => Math.max(1, c - 1))}
-                >−</PixelButton>
-                <span style={{
-                  minWidth: 36, textAlign: 'center',
-                  fontFamily: 'var(--cth-font-display)',
-                  fontSize: 'var(--cth-text-display-md)',
-                  lineHeight: 'var(--cth-lh-display-md)',
-                  color: 'var(--cth-ink-900)'
-                }}>{count}</span>
-                <PixelButton
-                  variant="secondary"
-                  size="md"
-                  disabled={busy || count >= MAX_AGENT_COUNT}
-                  onClick={() => setCount((c) => Math.min(MAX_AGENT_COUNT, c + 1))}
-                >+</PixelButton>
-                <span style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginLeft: 4 }}>
-                  {count > 1
-                    ? `spawns ${count} agents, all with the settings above`
-                    : 'spawn a single agent'}
-                </span>
-              </div>
-            </Row>
-
             {error && (
               <div style={{
                 padding: '6px 10px',
@@ -400,10 +401,17 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
               </div>
             )}
 
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center', marginTop: 4 }}>
+              <span style={{ flex: 1, fontSize: 11, color: 'var(--cth-ink-500)' }}>
+                {allTaken
+                  ? 'all characters are in use — archive an agent to free one'
+                  : selectedCount > 0
+                    ? `${selectedCount} selected → spawns ${selectedCount} agent${selectedCount === 1 ? '' : 's'}`
+                    : 'pick at least one character'}
+              </span>
               <PixelButton variant="ghost" size="md" onClick={onClose} disabled={busy}>cancel</PixelButton>
-              <PixelButton variant="primary" size="md" onClick={submit} disabled={busy}>
-                {busy ? 'spawning...' : (count > 1 ? `spawn ${count}` : 'spawn')}
+              <PixelButton variant="primary" size="md" onClick={submit} disabled={busy || selectedCount === 0}>
+                {busy ? 'spawning...' : `spawn ${selectedCount}`}
               </PixelButton>
             </div>
           </div>

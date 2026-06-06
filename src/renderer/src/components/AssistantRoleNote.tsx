@@ -2,10 +2,9 @@ import { Icon } from './Icon';
 import { useStore } from '@/store/store';
 
 /** Footer shown under the assistant's terminal in place of a message composer.
- *  The assistant isn't messaged directly — it's fed by Michael's enrich queue —
- *  so this explains its role and points to the toggle in Michael's panel. */
+ *  Dwight isn't messaged directly, so this explains its role rather than
+ *  offering a composer, and points to Michael. */
 export function AssistantRoleNote() {
-  const enrichEnabled = useStore((s) => s.enrichEnabled);
   const select = useStore((s) => s.select);
 
   return (
@@ -18,7 +17,7 @@ export function AssistantRoleNote() {
     }}>
       <Icon name="sparkle" />
       <div style={{ flex: 1, minWidth: 0, fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-700)' }}>
-        Dwight is Michael's assistant, he helps him enrich context before he executes a task.<strong>{enrichEnabled ? 'on' : 'off'}</strong>.
+        Dwight is Michael's silent prep assistant. It isn't messaged directly and has no standing task right now.
       </div>
       <button
         onClick={() => select('god')}

@@ -39,6 +39,8 @@ interface TasksStore {
   saveEdit: (t: ProjectTask, schedule: ScheduleSpec) => void;
   deleteTask: (id: string) => void;
   moveTask: (id: string, status: Status) => void;
+  /** Set a task's priority (1-5) in place — one persist, no status re-stamp. */
+  setPriority: (id: string, priority: number) => void;
   archiveTask: (id: string) => void;
   /** Archive every non-archived task in the `done` column in one write. */
   archiveAllDone: () => void;
@@ -50,6 +52,22 @@ interface TasksStore {
 }
 
 let dispatchMsgTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Plan-mode dispatch addendum: tells the agent to PLAN, not implement, and park
+ *  the task in Needs Approval (status='needs-approval') for human sign-off when the
+ *  plan is ready. Appended to the dispatch body only for tasks flagged planMode. */
+const PLAN_MODE_BLOCK =
+  '\nPLAN MODE — produce a concise implementation PLAN for this task and DO NOT implement it. '
+  + "When the plan is ready, post a task-update with kind 'needs-approval' whose text is the plan "
+  + 'summary, to park this task in Needs Approval for human sign-off.\n';
+
+/** The inbox body for dispatching a task: the standard `Task: … [task:id]\nContext: …`
+ *  shell, plus the plan-mode block when the task is flagged planMode. Shared by
+ *  dispatchTask and dispatchAllTodo so both honor plan mode identically. */
+function dispatchBody(t: ProjectTask): string {
+  const desc = t.description?.trim() ? t.description.trim() : '(no description)';
+  return `Task: ${t.title} [task:${t.id}]\nContext: ${desc}\n${t.planMode ? PLAN_MODE_BLOCK : ''}`;
+}
 
 const useTasksStore = create<TasksStore>((set, get) => ({
   tasks: [],
@@ -131,6 +149,14 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     get().persist(get().tasks.map((t) => (t.id === id ? { ...t, status, statusUpdatedAt: new Date().toISOString() } : t)));
   },
 
+  // Set priority in place from the board card. Clamp to 1-5 (the range the form
+  // and PriorityDots assume) and persist with a single map. Priority is orthogonal
+  // to status, so unlike moveTask this leaves statusUpdatedAt untouched.
+  setPriority: (id, priority) => {
+    const p = Math.max(1, Math.min(5, Math.round(priority)));
+    get().persist(get().tasks.map((t) => (t.id === id ? { ...t, priority: p } : t)));
+  },
+
   // Archive: hide the card from the board (kept on disk, restorable) and drop its
   // linked schedule so it stops auto-dispatching — same mission cleanup as delete.
   // Status is left untouched so a restore returns it to its original column.
@@ -181,9 +207,8 @@ const useTasksStore = create<TasksStore>((set, get) => ({
       if (dispatchMsgTimer) clearTimeout(dispatchMsgTimer);
       if (msg !== null) dispatchMsgTimer = setTimeout(() => set({ dispatchMsg: null }), 5000);
     };
-    const desc = t.description?.trim() ? t.description.trim() : '(no description)';
     const to = t.assignee ?? 'god';
-    const body = `Task: ${t.title} [task:${t.id}]\nContext: ${desc}\n`;
+    const body = dispatchBody(t);
     const res = await window.cth.projectSend(
       { to, act: 'request', subject: 'Task from you', body }, 'human');
     if (!res.ok) {
@@ -220,9 +245,8 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     let delivered = 0;
     let failed = 0;
     for (const t of todo) {
-      const desc = t.description?.trim() ? t.description.trim() : '(no description)';
       const to = t.assignee ?? 'god';
-      const body = `Task: ${t.title} [task:${t.id}]\nContext: ${desc}\n`;
+      const body = dispatchBody(t);
       const res = await window.cth.projectSend(
         { to, act: 'request', subject: 'Task from you', body }, 'human');
       if (res.ok) { sent.add(t.id); delivered += res.delivered ?? 0; }
@@ -298,6 +322,7 @@ export function useTasks() {
     saveEdit: s.saveEdit,
     deleteTask: s.deleteTask,
     moveTask: s.moveTask,
+    setPriority: s.setPriority,
     archiveTask: s.archiveTask,
     archiveAllDone: s.archiveAllDone,
     unarchiveTask: s.unarchiveTask,
