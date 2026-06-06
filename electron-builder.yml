@@ -1,0 +1,96 @@
+appId: com.officevibe.app
+productName: OfficeVibe
+
+# Notarize + staple after signing, but only when APPLE_* creds are in the env
+# (the hook no-ops otherwise, so contributor builds still work). Root-level hook.
+afterSign: build/notarize.cjs
+
+# electron-vite emits the app into out/; package exactly that plus what the
+# runtime needs. node-pty is native, so keep it out of the asar.
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - out/**
+  - package.json
+  - "!**/*.{md,map,ts,tsx}"
+  - "!**/{.eslintrc,.prettierrc,tsconfig*.json,electron.vite.config.*}"
+
+asarUnpack:
+  - "**/node_modules/node-pty/**"
+
+# Rebuild native deps (node-pty) for the target during packaging.
+npmRebuild: true
+
+# ---- macOS ----
+mac:
+  category: public.app-category.developer-tools
+  icon: build/icon.icns
+  # Declare WHY the app touches the user's folders. macOS shows these strings in
+  # the privacy prompt and, for a signed app, remembers the grant — so the user
+  # is asked ONCE instead of on every agent action.
+  extendInfo:
+    NSMicrophoneUsageDescription: "OfficeVibe transcribes your voice locally (on-device) so you can speak instructions to your agents instead of typing."
+    NSDocumentsFolderUsageDescription: "OfficeVibe runs your Claude Code agents, which read and write files in the project folders you point them at."
+    NSDesktopFolderUsageDescription: "OfficeVibe's agents may work on projects located on your Desktop."
+    NSDownloadsFolderUsageDescription: "OfficeVibe's agents may work on projects located in your Downloads."
+    NSRemovableVolumesUsageDescription: "OfficeVibe's agents may work on projects located on external volumes."
+    NSNetworkVolumesUsageDescription: "OfficeVibe's agents may work on projects located on network volumes."
+  # Hardened runtime + entitlements so the spawned `claude` agents inherit this
+  # app's TCC responsibility (one grant covers them all) and node-pty can load.
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  gatekeeperAssess: false
+  # Disable electron-builder's BUILT-IN notarization. It auto-triggers whenever the
+  # APPLE_* env vars are present and runs inside signApp — a path our afterSign hook's
+  # try/catch can't guard, so a bad-credential failure there hard-fails the whole
+  # release (exactly what bit us). Instead, the root-level `afterSign: build/notarize.cjs`
+  # hook does notarization best-effort: it tries, and on failure ships the signed (un-
+  # notarized) build rather than sinking the cross-platform release. Notarization
+  # resumes automatically once the APPLE_* secrets are valid — no further changes.
+  notarize: false
+  # Signing: TCC binds a remembered grant to a STABLE code signature, so a signed
+  # build is asked for folder access ONCE. The "Developer ID Application" cert is
+  # auto-discovered from the login keychain (CSC_IDENTITY_AUTO_DISCOVERY). If no
+  # cert is found, electron-builder warns and produces an unsigned build, so
+  # contributors without an Apple account can still build.
+  #   To sign: install your "Developer ID Application" cert into the keychain.
+  #   (Override with CSC_LINK=<path-to.p12> + CSC_KEY_PASSWORD for CI.)
+  # Notarization happens in the root-level `afterSign` hook (top of this file).
+  target:
+    - target: dmg
+      arch: [universal]
+  artifactName: OfficeVibe-${version}-mac-${arch}.dmg
+
+dmg:
+  title: OfficeVibe ${version}
+
+# ---- Windows ----
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: OfficeVibe-${version}-win-x64-setup.exe
+  shortcutName: OfficeVibe
+
+portable:
+  artifactName: OfficeVibe-${version}-win-x64-portable.exe
+
+# ---- Linux ----
+linux:
+  category: Development
+  icon: build/icon.png
+  target:
+    - target: AppImage
+      arch: [x64]
+  artifactName: OfficeVibe-${version}-linux-x86_64.AppImage

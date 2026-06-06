@@ -1,0 +1,27 @@
+node_modules/
+node_modules
+out/
+dist/
+.DS_Store
+*.log
+.vite/
+.env
+.env.local
+.env.signing
+.gstack/
+
+# signing / notarization secrets — NEVER commit these
+*.p8
+*.p12
+*.cer
+*.mobileprovision
+build/AuthKey_*.p8
+
+# heavy hero source — only the compressed hero.mp4/.webm are deployed
+docs/media/*.mov
+
+# Vendored, fully-offline speech-to-text assets (Whisper ONNX model + ORT wasm).
+# Fetched/copied by `npm run prepare-stt-assets` (auto-run on prebuild). Kept out
+# of git so the repo stays lean; regenerated on demand and packaged into the build.
+src/renderer/public/models/
+src/renderer/public/wasm/

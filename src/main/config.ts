@@ -1,0 +1,252 @@
+import { app } from 'electron';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+/** A scheduled auto-dispatch handled by the scheduler. Historically a recurring
+ *  "mission" (label/to/body fired every intervalMs); now also backs Tasks-tab
+ *  schedules via taskId + mode. Mirrored in preload/index.ts and TasksKanban.tsx
+ *  — keep the three in sync. */
+export interface ScheduledMission {
+  id: string;
+  label: string;
+  intervalMs: number;
+  to: string;
+  body: string;
+  enabled: boolean;
+  lastFiredAt?: number;
+  /** When set, this schedule auto-dispatches a Tasks-tab task (re-read live at
+   *  fire time); label/to are a best-effort snapshot and body is unused. */
+  taskId?: string;
+  /** 'recurring' fires every intervalMs; 'once' fires a single time at runAt.
+   *  Absent ⇒ 'recurring' (back-compat with pre-existing missions). */
+  mode?: 'recurring' | 'once';
+  /** Epoch ms of the single fire when mode === 'once'. */
+  runAt?: number;
+}
+
+/** A project the user has opened or created. Each project is a self-contained
+ *  folder (the data collection formerly called the "hive") named `officevibe-<slug>`. */
+export interface ProjectRef {
+  /** Display name (e.g. "Acme"); persisted in the folder's officevibe.json manifest. */
+  name: string;
+  /** Absolute path to the project folder = the data root the managers point at. */
+  path: string;
+}
+
+export interface HarnessConfig {
+  /** Has the user completed the first-run onboarding? */
+  onboardingComplete: boolean;
+  /** Default PARENT directory for newly created projects (the old "harness home").
+   *  Project folders live under here by default; an opened project may live anywhere. */
+  harnessHome: string | null;
+  /** The currently open project folder = the data root (agents, registry, tasks,
+   *  board, log, palace). Replaces the old `<harnessHome>/hive` path. */
+  activeProjectPath: string | null;
+  /** Every project the user has opened/created — drives the project switcher. */
+  projects: ProjectRef[];
+  /** Folders the user registered during onboarding (used as quick-picks). */
+  registeredRepos: string[];
+  /** When true, new agents are spawned with --permission-mode bypassPermissions. */
+  autoMode: boolean;
+  /** When true, Michael is auto-oriented on boot and idle agents are auto-nudged
+   *  to drain their inbox. When false (default), startup is passive — Michael
+   *  spawns idle and nothing runs until the user dispatches the first task. */
+  autoPilot?: boolean;
+  /** When true, Michael is auto-sent `/remote-control` ~4s after a fresh spawn so
+   *  the human can approve permission prompts from their phone. Default false:
+   *  the slash command is skipped and the user can run it manually if desired. */
+  remoteControl?: boolean;
+  /** The command we run when spawning a new agent. */
+  defaultCommand: string;
+  /** Default model for newly spawned agents (e.g. 'claude-sonnet-4-6[1m]'); unset = CLI default. */
+  defaultModel?: string;
+  /** Enable semantic memory (MemPalace CLI). No-op if mempalace isn't installed. */
+  semanticMemory: boolean;
+  /** Embedding model for the palace: lightweight 'minilm' or multilingual 'embeddinggemma'. */
+  embeddingModel: 'minilm' | 'embeddinggemma';
+  /** Whisper dictation model: accurate 'whisper-base.en' (default) or lighter/faster
+   *  'whisper-tiny.en'. The string is the on-disk model folder name the STT worker loads. */
+  sttModel: 'whisper-base.en' | 'whisper-tiny.en';
+  /** Recurring auto-dispatch missions handled by the scheduler. */
+  missions?: ScheduledMission[];
+  /** Fire native desktop notifications on agent lifecycle events (idle finish / waiting for input). */
+  notifications?: boolean;
+  /** Master toggle for the Slack → Michael's-queue integration. */
+  slackEnabled?: boolean;
+  /** Slack app signing secret (Basic Information → Signing Secret). Never logged. */
+  slackSigningSecret?: string;
+  /** Bot token (xoxb-…) — only needed if the bot ever replies; optional for now. */
+  slackBotToken?: string;
+  /** Restrict ingestion to one channel id; empty/undefined = any channel. */
+  slackChannelId?: string;
+  /** Local HTTP port the webhook server binds to (default 3847). */
+  slackPort?: number;
+}
+
+const DEFAULTS: HarnessConfig = {
+  onboardingComplete: false,
+  harnessHome: null,
+  activeProjectPath: null,
+  projects: [],
+  registeredRepos: [],
+  autoMode: true,
+  autoPilot: false,
+  remoteControl: false,
+  defaultCommand: 'claude',
+  semanticMemory: true,
+  embeddingModel: 'minilm',
+  sttModel: 'whisper-base.en',
+  missions: [],
+  notifications: false,
+  slackEnabled: false,
+  slackSigningSecret: undefined,
+  slackBotToken: undefined,
+  slackChannelId: undefined,
+  slackPort: undefined
+};
+
+function configPath(): string {
+  return join(app.getPath('userData'), 'config.json');
+}
+
+export function readConfig(): HarnessConfig {
+  const p = configPath();
+  if (!existsSync(p)) return { ...DEFAULTS };
+  try {
+    const raw = readFileSync(p, 'utf8');
+    const parsed = JSON.parse(raw);
+    return migrateProjects({ ...DEFAULTS, ...parsed });
+  } catch {
+    return { ...DEFAULTS };
+  }
+}
+
+/** Back-compat + self-heal: a config saved before the "project" concept has
+ *  `harnessHome` and data at `<harnessHome>/hive`, but no `activeProjectPath`. Adopt
+ *  that hive folder in place as the first project (no data is moved). Also prunes
+ *  phantom/duplicate projects (a folder that no longer exists, or a non-project
+ *  parent directory that lacks an officevibe.json manifest) and guarantees the
+ *  active project is present in `projects`. Pure (never writes) — boot persists it once. */
+function migrateProjects(cfg: HarnessConfig): HarnessConfig {
+  // 1. Drop phantoms (missing folders, non-project parent dirs) and de-dupe.
+  const projects = pruneProjects(Array.isArray(cfg.projects) ? cfg.projects : []);
+
+  // 2. Legacy adoption: a pre-"project" config has data at <harnessHome>/hive and
+  //    no activeProjectPath. Adopt that folder in place if it still exists.
+  let activeProjectPath = cfg.activeProjectPath ?? null;
+  if (!activeProjectPath && cfg.harnessHome) {
+    const legacy = join(cfg.harnessHome, 'hive');
+    if (existsSync(legacy)) activeProjectPath = legacy;
+  }
+
+  // 3. Validate the active path with a LENIENT folder-level check (NOT the manifest
+  //    test): a freshly opened folder or never-activated legacy hive has no manifest
+  //    yet. If the active folder is gone, repoint at the first surviving real project
+  //    (from the already-pruned list) so the app never points at a ghost.
+  if (activeProjectPath && !existsSync(activeProjectPath)) {
+    activeProjectPath = projects[0]?.path ?? null;
+  }
+
+  // 4. Guarantee the (validated) active project is present in the list. It may have
+  //    been pruned in step 1 for lacking a manifest yet — re-add it with a derived name.
+  if (activeProjectPath && !projects.some((p) => p.path === activeProjectPath)) {
+    projects.push({ name: deriveProjectName(activeProjectPath), path: activeProjectPath });
+  }
+
+  return { ...cfg, activeProjectPath, projects };
+}
+
+export function writeConfig(patch: Partial<HarnessConfig>): HarnessConfig {
+  const current = readConfig();
+  const next: HarnessConfig = { ...current, ...patch };
+  const p = configPath();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(next, null, 2), 'utf8');
+  return next;
+}
+
+/** Wipe the persisted config back to first-run defaults so the app boots into
+ *  onboarding again. Used by the "reset & start over" flow. */
+export function resetConfig(): HarnessConfig {
+  const p = configPath();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(DEFAULTS, null, 2), 'utf8');
+  return { ...DEFAULTS };
+}
+
+/** Auto-suggested command string given current autoMode preference. */
+export function commandForAutoMode(config: HarnessConfig): string {
+  if (config.autoMode) {
+    return `${config.defaultCommand} --permission-mode bypassPermissions`;
+  }
+  return config.defaultCommand;
+}
+
+/** Ensure a folder exists on disk (used for harnessHome + project folders). */
+export function ensureHarnessHome(path: string): { ok: boolean; error?: string } {
+  try {
+    mkdirSync(path, { recursive: true });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// ─── Projects ────────────────────────────────────────────────────────────────
+
+/** Filesystem-safe slug for a project name, e.g. "My Project!" → "my-project". */
+export function slugify(name: string): string {
+  return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
+}
+
+/** On-disk folder name for a new project: `officevibe-<slug>`. */
+export function projectFolderName(name: string): string {
+  return `officevibe-${slugify(name)}`;
+}
+
+/** Default parent directory for newly created projects. */
+export function defaultProjectsDir(cfg: HarnessConfig): string {
+  if (cfg.harnessHome) return cfg.harnessHome;
+  if (cfg.activeProjectPath) return dirname(cfg.activeProjectPath);
+  return process.env.HOME ?? process.cwd();
+}
+
+/** Human-readable name for a project folder: prefer its officevibe.json manifest,
+ *  then fall back to the folder basename (stripping the `officevibe-` prefix). The
+ *  legacy `hive` folder maps to "Default". */
+export function deriveProjectName(path: string): string {
+  try {
+    const manifest = JSON.parse(readFileSync(join(path, 'officevibe.json'), 'utf8')) as { name?: unknown };
+    if (manifest && typeof manifest.name === 'string' && manifest.name.trim()) return manifest.name.trim();
+  } catch { /* no manifest — derive from the folder name */ }
+  const base = path.split(/[\\/]/).filter(Boolean).pop() ?? 'project';
+  if (base === 'hive') return 'Default';
+  return base.replace(/^officevibe-/i, '') || base;
+}
+
+/** Robust "is this a real OfficeVibe project" test: the folder must exist AND
+ *  contain an officevibe.json manifest. Rejects both a missing folder and a
+ *  non-project parent directory. Never throws. */
+export function isProjectFolder(path: string): boolean {
+  try {
+    return existsSync(join(path, 'officevibe.json'));
+  } catch {
+    return false;
+  }
+}
+
+/** De-dupe a project list by path (keeping the last/newest display name, matching
+ *  upsertProject) and drop any entry that is not a real project folder on disk. */
+export function pruneProjects(projects: ProjectRef[]): ProjectRef[] {
+  const byPath = new Map<string, ProjectRef>();
+  for (const p of projects) {
+    if (p && typeof p.path === 'string' && isProjectFolder(p.path)) byPath.set(p.path, p);
+  }
+  return [...byPath.values()];
+}
+
+/** Upsert a project into the list by path (keeps the newest display name). */
+export function upsertProject(projects: ProjectRef[], ref: ProjectRef): ProjectRef[] {
+  const rest = projects.filter((p) => p.path !== ref.path);
+  return [...rest, ref];
+}
