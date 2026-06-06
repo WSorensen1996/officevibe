@@ -37,13 +37,6 @@ const SIT_OFFSET_SIDE = 4; // left/right: a smaller drop plus the sideways tuck
 const SEAT_LEG_CROP = 8;
 const SEAT_BACK_CROP = 2;
 
-// Idle 30/30 loop: between tasks an agent alternates roaming the floor with
-// resting at its own desk — for every IDLE_LINGER_SECONDS it spends lingering it
-// then sits at its desk for DESK_REST_SECONDS, and repeats. Working agents skip
-// this entirely (they stay seated via sitAtDesk).
-const IDLE_LINGER_SECONDS = 30;
-const DESK_REST_SECONDS = 30;
-
 interface CharacterOptions {
   agentId: string;
   mapRenderer: TiledMapRenderer;
@@ -74,10 +67,6 @@ export class Character {
   private wandering = false;
   private idleTimer = 0;
   private idleWanderDelay = 1 + Math.random() * 3;
-  // Idle 30/30 loop state (see constants above). Active only between tasks.
-  private idleLoop = false;
-  private idleLoopPhase: 'linger' | 'toDesk' | 'resting' = 'linger';
-  private idleLoopTimer = 0;
   private direction: Direction = 'down';
   private arrivalCallback: (() => void) | null = null;
 
@@ -144,7 +133,7 @@ export class Character {
   }
 
   walkToAndThen(tile: { x: number; y: number }, callback: () => void): void {
-    this.idleLoop = false; // a directed walk-and-do (e.g. a café break) owns the avatar
+    this.wandering = false; // a directed walk-and-do (e.g. a café break) owns the avatar
     this.arrivalCallback = callback;
     this.moveTo(tile);
     if (this.state !== 'walk') {
@@ -159,12 +148,12 @@ export class Character {
   /** Sit at the assigned desk, facing the monitor. Walks there first if away.
    *  This is the default pose — agents stay seated unless blocked. */
   sitAtDesk(): void {
-    this.idleLoop = false;     // an explicit desk command ends the idle loop
+    this.wandering = false;     // an explicit desk command ends any roaming
     this.walkToDeskAndSit();
   }
 
-  /** Walk to the home desk (if away) and sit. Shared by sitAtDesk (real
-   *  work/wait) and the idle-loop rest. */
+  /** Walk to the home desk (if away) and sit. Used by sitAtDesk when an agent
+   *  is working/waiting. */
   private walkToDeskAndSit(): void {
     this.wandering = false;
     const t = this.getTilePosition();
@@ -211,7 +200,6 @@ export class Character {
    *  sitAtDesk this leaves the agent's home desk untouched — it's a break, not
    *  work. */
   sitInPlace(dir: Direction): void {
-    this.idleLoop = false;
     this.wandering = false;
     this.arrivalCallback = null;
     this.applySitPose(dir);
@@ -238,7 +226,6 @@ export class Character {
   }
 
   setIdle(): void {
-    this.idleLoop = false;
     this.state = 'idle';
     this.pendingWork = null;
     this.pendingSit = false;
@@ -251,18 +238,13 @@ export class Character {
   }
 
   /** Roam the office between tasks. Picks random walkable tiles and strolls
-   *  to them until the agent is given work again. */
+   *  to them indefinitely — idle agents wander continuously and only sit at a
+   *  desk when actually given work (sitAtDesk). */
   startWandering(): void {
-    if (this.idleLoop && this.wandering) return; // already in the linger phase
-    // (Re)enter the idle loop at its linger phase, then begin roaming.
-    this.idleLoop = true;
-    this.idleLoopPhase = 'linger';
-    this.idleLoopTimer = 0;
     this.beginWander();
   }
 
-  /** Low-level: start roaming the floor now. Drives the linger phase of the
-   *  idle loop (and is reused when a rest ends). Does not touch the loop state. */
+  /** Low-level: start roaming the floor now. */
   private beginWander(): void {
     if (this.wandering) return;
     this.sitting = false;
@@ -281,7 +263,6 @@ export class Character {
 
   /** Walk to an arbitrary tile (e.g. the waiting area when blocked); stands on arrival. */
   walkToTile(tile: { x: number; y: number }): void {
-    this.idleLoop = false;
     this.pendingWork = null;
     this.pendingSit = false;
     this.sitting = false;
@@ -390,7 +371,6 @@ export class Character {
     // Working agents stay seated; between tasks they wander the office.
     if (this.state === 'walk') this.updateWalk(dt);
     else if (this.wandering) this.updateWander(dt);
-    if (this.idleLoop) this.updateIdleLoop(dt);
 
     this.sprite.container.zIndex = this.py;
     this.thoughtBubble.setPosition(this.px, this.py);
@@ -481,43 +461,6 @@ export class Character {
     this.direction = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
     this.sprite.setAnimation('walk', this.direction);
     this.sprite.setPosition(this.px, this.py);
-  }
-
-  /** Drive the idle 30/30 loop: linger on the floor, then rest at the desk,
-   *  then linger again — independent of the low-level walk/wander animation. */
-  private updateIdleLoop(dt: number): void {
-    switch (this.idleLoopPhase) {
-      case 'linger':
-        // Roaming (beginWander) handles the motion; we just time the phase.
-        this.idleLoopTimer += dt;
-        if (this.idleLoopTimer >= IDLE_LINGER_SECONDS) {
-          this.idleLoopPhase = 'toDesk';
-          this.idleLoopTimer = 0;
-          this.walkToDeskAndSit(); // head home and sit
-        }
-        break;
-      case 'toDesk':
-        // Wait until we've actually arrived and sat down, then start the rest
-        // clock. Watchdog: if the desk is somehow unreachable, resume lingering.
-        this.idleLoopTimer += dt;
-        if (this.sitting) {
-          this.idleLoopPhase = 'resting';
-          this.idleLoopTimer = 0;
-        } else if (this.idleLoopTimer >= 20) {
-          this.idleLoopPhase = 'linger';
-          this.idleLoopTimer = 0;
-          this.beginWander();
-        }
-        break;
-      case 'resting':
-        this.idleLoopTimer += dt;
-        if (this.idleLoopTimer >= DESK_REST_SECONDS) {
-          this.idleLoopPhase = 'linger';
-          this.idleLoopTimer = 0;
-          this.beginWander(); // stand up and roam again
-        }
-        break;
-    }
   }
 
   private updateWander(dt: number): void {

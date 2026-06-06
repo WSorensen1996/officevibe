@@ -749,8 +749,44 @@ export class ProjectManager {
         from: msg.from, to: msg.to, act: msg.act, subject: msg.subject, id: msg.id
       });
     }
+    // Auto-assign at delegation: an orchestrator handing a task to a single
+    // worker (a [task:<id>] request) should move the card to that worker NOW —
+    // not wait for the worker to post 'doing' (which it may skip, jumping
+    // straight to 'done', leaving the card stuck on the creator). Same claim as
+    // 8tzy's 'doing', just earlier in the lifecycle.
+    this.claimTaskOnDelegation(msg, delivered, reg, godId);
     this.emitMessage(msg, delivered);
     return delivered;
+  }
+
+  /** When a [task:<id>] REQUEST is delivered to exactly one worker, reassign that
+   *  task to the recipient so the board follows the delegation instantly. Skips:
+   *  god-as-recipient (god keeps a task it routes to itself), the assistant
+   *  (a co-orchestrator — it receives coordination mail, it doesn't "own" the
+   *  work), broadcasts / multi- / zero-recipient sends (no single owner), and
+   *  non-`request` acts (a question or FYI that merely *mentions* a task id must
+   *  not hijack the assignee). Sender-agnostic — covers Michael, Dwight, or any
+   *  agent delegating. Stamps assigneeUpdatedAt so the writeTasks merge keeps it
+   *  over a stale renderer copy, while a later human reassign (newer clock) still
+   *  wins. No-op if the task is unknown or already assigned to the recipient. */
+  private claimTaskOnDelegation(msg: ProjectMessage, delivered: string[], reg: Registry, godId: string): void {
+    if (msg.act !== 'request') return;
+    if (delivered.length !== 1) return; // broadcast / multi / dropped → no single owner
+    const recipient = delivered[0];
+    if (recipient === godId || reg.agents[recipient]?.isAssistant) return;
+    const m = /\[task:([^\]]+)\]/.exec(`${msg.subject}\n${msg.body}`);
+    if (!m) return;
+    const taskId = m[1];
+    const root = this.root();
+    if (!root) return;
+    const data = this.readJson<{ tasks: ProjectTask[] }>(join(root, 'tasks.json'), { tasks: [] });
+    const task = data.tasks.find((t) => t.id === taskId);
+    if (!task || task.assignee === recipient) return; // unknown task or already assigned → no-op
+    task.assignee = recipient;
+    task.assigneeUpdatedAt = new Date().toISOString();
+    this.writeJson(join(root, 'tasks.json'), data);
+    this.appendLog({ kind: 'task-delegated', taskId, to: recipient, from: msg.from });
+    this.emit?.('project:taskUpdated', { taskId, by: recipient, kind: 'note', text: `delegated to ${recipient}` });
   }
 
   /** Tell the renderer a message was routed, with its resolved recipients, so

@@ -31,6 +31,38 @@ export type { ProjectTask, TaskUpdate } from './tasks/taskShared';
 const IS_MAC = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC');
 const NEW_TASK_HINT = IS_MAC ? '⌘⏎' : 'Ctrl ⏎';
 
+// Workload-aware default assignee for NEW tasks (task bii2). New tasks used to
+// always default to Michael (god), so he piled up while other agents sat idle.
+// Policy = the human-APPROVED recommended defaults (tweak the marked spots):
+//   • pool   = Michael + live WORKERS (assistant/Dwight excluded from the auto
+//              default — he's inert; still MANUALLY selectable in the <select>)
+//   • busy   = Michael's status ∈ {working, thinking}  ← add 'waiting' to widen
+//   • load   = an agent's OPEN tasks (already archived-filtered upstream; drop done)
+//   • result = an EDITABLE default — the assignee <select> still overrides freely
+// If Michael is free (or absent) → default to Michael (he picks up / delegates).
+// If Michael is busy → the least-loaded live teammate, ties → Michael (he stays
+// the fallback), so counts stay roughly even. Ghost (gone) agents are skipped.
+const WORKING_STATUSES = new Set(['working', 'thinking']); // ← Michael "is working"
+function pickAutoAssignee(tasks: ProjectTask[]): string {
+  const roster = useStore.getState().agents;
+  const god = roster.find((a) => a.isGod);
+  const godId = god?.id ?? 'god';
+  if (!god || !WORKING_STATUSES.has(god.status)) return godId; // Michael free → Michael
+  // Michael busy → spread to the least-loaded live teammate. Seed with Michael so
+  // a strict tie resolves to him; only a STRICTLY lighter teammate wins.
+  const openCount = (id: string) =>
+    tasks.filter((t) => t.assignee === id && t.status !== 'done').length;
+  let best = godId;
+  let bestLoad = openCount(godId);
+  for (const a of roster) {
+    // skip Michael (seeded), the inert assistant (Dwight — won't pick work up), + gone agents
+    if (a.id === godId || a.isAssistant || a.status === 'ghost') continue;
+    const load = openCount(a.id);
+    if (load < bestLoad) { best = a.id; bestLoad = load; }
+  }
+  return best;
+}
+
 /**
  * Task kanban over hive/tasks.json. The live ledger + every mutation live in the
  * shared `useTasks` hook (one poller, one subscription) so this board and the
@@ -805,9 +837,14 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   const [draft0] = useState(() => (initial ? null : useStore.getState().taskDraft));
   const [title, setTitle] = useState(initial?.title ?? draft0?.title ?? '');
   const [description, setDescription] = useState(initial?.description ?? draft0?.description ?? seed?.description ?? '');
-  // New tasks default to Michael (god) so the assignee is never empty; editing
-  // preserves the task's existing assignee (including deliberately unassigned).
-  const [assignee, setAssignee] = useState(initial?.assignee ?? draft0?.assignee ?? (editing ? '' : 'god'));
+  // New tasks get a WORKLOAD-AWARE default (pickAutoAssignee, task bii2): Michael
+  // when he's free, else the least-loaded live teammate — so work spreads instead
+  // of always piling on Michael. Still an editable <select> (the human overrides).
+  // Lazy initializer = computed ONCE when the form opens (same pattern as draft0);
+  // a persisted draft or an edit's existing assignee take precedence.
+  const [assignee, setAssignee] = useState(() =>
+    initial?.assignee ?? draft0?.assignee ?? (editing ? '' : pickAutoAssignee(existing))
+  );
   const [priority, setPriority] = useState(initial?.priority ?? draft0?.priority ?? 3);
   const [deps, setDeps] = useState<string[]>(initial?.dependsOn ?? draft0?.deps ?? seed?.dependsOn ?? []);
   const [status, setStatus] = useState<Status>(initial?.status ?? 'todo');
