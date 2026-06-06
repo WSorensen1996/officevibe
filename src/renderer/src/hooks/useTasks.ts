@@ -7,8 +7,10 @@ import {
   type ScheduleSpec,
   type Status,
   POLL_MS,
+  STALE_AFTER_MS,
   parseTasks,
-  isTaskUnread
+  isTaskUnread,
+  isTaskStale
 } from '@/components/tasks/taskShared';
 
 /**
@@ -140,6 +142,21 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     const seeded = { ...t, assigneeUpdatedAt: t.assignee ? new Date().toISOString() : undefined };
     get().persist([...get().tasks, seeded]);
     get().syncTaskMission(seeded, schedule);
+    // Notify the orchestrator on CREATE so a task doesn't sit in TODO unseen — no
+    // code watches the column, and historically only an explicit dispatch ever
+    // told god a task exists, so a created-but-undispatched card rotted (the #1
+    // "stuck in todo" cause). Only when unassigned or god-owned (an assigned task
+    // is the worker's via the dispatch/delegate path). This is a triage nudge: it
+    // does NOT stamp dispatchedAt or advance the column — the card stays in TODO
+    // until god delegates or it's dispatched. startFloor() lets the wake-nudge loop
+    // deliver it even with auto-pilot off. (When the human picks "create & dispatch"
+    // a second dispatch message also goes out — harmless: god dedups by task id.)
+    if (!seeded.assignee || seeded.assignee === 'god') {
+      window.cth
+        .projectSend({ to: 'god', act: 'request', subject: 'New task to triage', body: dispatchBody(seeded) }, 'human')
+        .catch(() => { /* best-effort nudge */ });
+      useStore.getState().startFloor();
+    }
   },
 
   // Replace a task in place. Preserve harness-owned `updates` (the form never
@@ -258,18 +275,32 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     if (!res.ok) {
       setMsg(`dispatch failed: ${res.error ?? '?'}`);
     } else {
-      // Stamp the card so the dispatch button hides; persisted, so it survives
-      // reloads until the task's status next changes (re-nudgeable when blocked).
-      // Map over the live store array, not the captured `t`, to avoid clobbering
-      // a concurrent edit.
+      // Advance the card to DOING and stamp it in ONE persist: dispatch is the
+      // root cause of "stuck in To-do" — moving the OWNER never moved the COLUMN,
+      // so a card whose assignee never posts 'doing' sat in To-do forever. Setting
+      // status:'doing' + a fresh statusUpdatedAt makes the column follow the
+      // dispatch now; the agent's later 'doing' becomes a harmless no-op, while
+      // blocked/done still move it. statusUpdatedAt MUST be `now` so the writeTasks
+      // recency merge keeps this over the renderer's stale copy. dispatchedAt hides
+      // the dispatch button until status next changes (a stale card re-shows it).
+      // Map over the live store array, not the captured `t`, to avoid clobbering a
+      // concurrent edit.
+      const stamp = new Date().toISOString();
       await get().persist(get().tasks.map((x) =>
-        (x.id === t.id ? { ...x, dispatchedAt: new Date().toISOString() } : x)));
+        (x.id === t.id ? { ...x, status: 'doing', statusUpdatedAt: stamp, dispatchedAt: stamp } : x)));
       useStore.getState().startFloor();
       const agents = useStore.getState().agents;
       const name = to === 'god' ? 'Michael' : (agents.find((a) => a.id === to)?.name ?? to);
+      // Honest delivery feedback: `delivered>0` only means the inbox FOLDER exists
+      // (an archived/idle agent still has one), not that anyone is live to read it.
+      // So check for a live pty and say "queued · offline" when the assignee isn't
+      // running — the reaper will re-route it; the human isn't falsely reassured.
+      const live = agents.some((a) => a.id === to && !!a.ptyId && !a.archived);
       setMsg((res.delivered ?? 0) === 0
         ? '⚠ no active agent received this'
-        : `dispatched to ${name}`);
+        : live
+          ? `dispatched to ${name}`
+          : `queued for ${name} · ⚠ offline, will run when it wakes`);
     }
   },
 
@@ -298,10 +329,15 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     }
     if (sent.size > 0) {
       const stamp = new Date().toISOString();
+      // Advance each dispatched card to DOING + stamp in the one persist (same
+      // root-cause fix as dispatchTask): the column follows the dispatch instead of
+      // sitting in To-do until the assignee posts 'doing'. statusUpdatedAt=now keeps
+      // it over the stale renderer copy in the writeTasks merge. All sent tasks were
+      // status==='todo' (the filter above), so 'doing' is always the right move.
       // Map over the live store array (not the captured list) so a concurrent edit
       // isn't clobbered; stamp only the ones that actually went out.
       await get().persist(get().tasks.map((x) =>
-        (sent.has(x.id) ? { ...x, dispatchedAt: stamp } : x)));
+        (sent.has(x.id) ? { ...x, status: 'doing', statusUpdatedAt: stamp, dispatchedAt: stamp } : x)));
       useStore.getState().startFloor();
     }
     setMsg(
@@ -333,14 +369,55 @@ const useTasksStore = create<TasksStore>((set, get) => ({
 //     many components mount the hook ────────────────────────────────────────--
 let refCount = 0;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let reaperTimer: ReturnType<typeof setInterval> | null = null;
 let unsubTaskUpdated: (() => void) | null = null;
 let unsubSchedulerFired: (() => void) | null = null;
+
+// ─── Stale-task reaper ───────────────────────────────────────────────────────
+// The active half of the stale safety net: dispatch advances a card to DOING, but
+// the actual owner can still be gone (archived/idle/never-spawned), in which case
+// the renderer wake-nudge loop — which only pokes LIVE idle ptys — never reaches it
+// and the card silently rots. Every minute, scan in-flight cards that have gone
+// stale (20m+ no activity, see isTaskStale); for any whose assignee is NOT a live
+// pty (or is unassigned/god), re-route a fresh nudge to god and start the floor so
+// it gets re-picked-up instead of sitting forever. De-duped to at most one ping per
+// STALE window per task, so a persistently-stuck card pings god ~every 20m (not
+// every tick) and a transient stall isn't spammed.
+const REAPER_INTERVAL_MS = 60_000;
+const lastReaped: Record<string, number> = {}; // taskId → epoch ms we last nudged god
+
+function reapStaleTasks(): void {
+  const { tasks } = useTasksStore.getState();
+  const agents = useStore.getState().agents;
+  const now = Date.now();
+  const isLive = (id: string): boolean => agents.some((a) => a.id === id && !!a.ptyId && !a.archived);
+  for (const t of tasks) {
+    if (!isTaskStale(t, now)) continue;
+    // A live, non-god assignee is already handled by the wake-nudge loop; the
+    // reaper only rescues cards whose owner is gone/idle-dead, unassigned, or god.
+    if (t.assignee && t.assignee !== 'god' && isLive(t.assignee)) continue;
+    const since = lastReaped[t.id];
+    if (since && now - since < STALE_AFTER_MS) continue; // already nudged this window
+    lastReaped[t.id] = now;
+    const who = t.assignee ? `assignee "${t.assignee}" is not live` : 'no assignee';
+    window.cth
+      .projectSend({
+        to: 'god',
+        act: 'request',
+        subject: 'Stale task — not picked up',
+        body: `${dispatchBody(t)}(Auto-flag: no activity for 20m+, ${who} — please re-route to a live worker or pick it up.)\n`
+      }, 'system')
+      .catch(() => { /* best-effort */ });
+    useStore.getState().startFloor();
+  }
+}
 
 function startLifecycle(): void {
   const { refresh, loadMissions } = useTasksStore.getState();
   refresh();
   loadMissions();
   pollTimer = setInterval(() => useTasksStore.getState().refresh(), POLL_MS);
+  reaperTimer = setInterval(reapStaleTasks, REAPER_INTERVAL_MS);
   // An agent posting a task-update flips the card live (~1.5s) instead of waiting
   // on the 5s poll: re-pull so the view stays byte-identical to disk.
   unsubTaskUpdated = window.cth.onProjectTaskUpdated(() => useTasksStore.getState().refresh());
@@ -350,6 +427,7 @@ function startLifecycle(): void {
 
 function stopLifecycle(): void {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (reaperTimer) { clearInterval(reaperTimer); reaperTimer = null; }
   unsubTaskUpdated?.(); unsubTaskUpdated = null;
   unsubSchedulerFired?.(); unsubSchedulerFired = null;
 }

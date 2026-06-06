@@ -21,7 +21,8 @@ import {
   shortWhen,
   shortId,
   canDispatchTask,
-  isTaskUnread
+  isTaskUnread,
+  isTaskStale
 } from './tasks/taskShared';
 
 export type { ProjectTask, TaskUpdate } from './tasks/taskShared';
@@ -507,6 +508,11 @@ function TaskCard({ task, assigneeName, mission, onMove, onSetPriority, onDispat
   // todo/blocked card has been dispatched it hides until its status next changes,
   // so it can't be dispatched twice (see canDispatchTask).
   const canDispatch = canDispatchTask(task);
+  // Stale = in-flight column with no activity for 20m+ (e.g. a dead/idle assignee
+  // that never posted, or a never-picked-up card). Recomputed every render, so the
+  // existing 5s poll re-render refreshes it — no new timer. The reaper
+  // (useTasks lifecycle) re-routes such cards to god; this badge is the human tell.
+  const stale = isTaskStale(task);
   const [showHistory, setShowHistory] = useState(false);
   const updates = task.updates ?? [];
   const last = updates.length ? updates[updates.length - 1] : undefined;
@@ -598,6 +604,15 @@ function TaskCard({ task, assigneeName, mission, onMove, onSetPriority, onDispat
             fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-900)'
           }} title="Plan mode — agent plans only, then parks in Needs Approval">
             <Icon name="sparkle" /> PLAN
+          </span>
+        )}
+        {stale && (
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 6px 0',
+            boxShadow: 'inset 0 0 0 1px var(--cth-coral)',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-coral)'
+          }} title="No activity for 20m+ — nobody picked this up (assignee may be offline). Re-nudging god automatically; click dispatch to re-send now.">
+            ⏳ stale · not picked up 20m+
           </span>
         )}
         {task.dependsOn.length > 0 && (

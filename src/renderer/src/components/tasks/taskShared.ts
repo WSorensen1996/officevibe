@@ -67,12 +67,43 @@ export interface ProjectTask {
 
 export type Status = ProjectTask['status'];
 
+/** A card is "stale" if it sits in an in-flight column (todo/doing) with no
+ *  activity for a while — the safety net behind auto-advance-on-dispatch for cards
+ *  that stall anyway (a dead/idle assignee that never posts a status update, a
+ *  god-delegated card whose worker died, or a task created while god was offline so
+ *  the create-nudge rotted). Deliberately NOT gated on dispatchedAt: a delegated
+ *  card advances to 'doing' WITHOUT a dispatchedAt (see project.ts
+ *  claimTaskOnDelegation), and a never-dispatched todo can stall too — both must be
+ *  catchable. blocked/done/needs-approval are deliberately parked, not stalled, so
+ *  they're excluded. "Latest activity" = the newest of statusUpdatedAt /
+ *  dispatchedAt / createdAt / last-update ts; createdAt guarantees latest>0 so a
+ *  brand-new untouched card eventually goes stale. */
+export const STALE_AFTER_MS = 20 * 60 * 1000;
+
+export function isTaskStale(task: ProjectTask, now: number = Date.now()): boolean {
+  if (task.archived) return false;
+  if (task.status !== 'todo' && task.status !== 'doing') return false;
+  const ups = task.updates ?? [];
+  const lastUpdateTs = ups.length ? ups[ups.length - 1].ts : undefined;
+  const latest = Math.max(
+    Date.parse(task.statusUpdatedAt ?? '') || 0,
+    Date.parse(task.dispatchedAt ?? '') || 0,
+    Date.parse(task.createdAt ?? '') || 0,
+    lastUpdateTs ? (Date.parse(lastUpdateTs) || 0) : 0
+  );
+  return latest > 0 && latest < now - STALE_AFTER_MS;
+}
+
 /** Whether the dispatch button should show. Dispatchable columns only
  *  (todo/blocked), and hidden once dispatched until the task's status changes
  *  again — so a freshly dispatched card can't be re-dispatched, but a stuck or
- *  blocked one stays re-nudgeable. ISO-8601 UTC strings compare chronologically
- *  as plain strings (same convention the writeTasks merge relies on). */
+ *  blocked one stays re-nudgeable. A STALE card is ALWAYS re-nudgeable (even when
+ *  status==='doing' after auto-advance), so a stalled card can be kicked again
+ *  instead of the dispatchedAt-hides-the-button trap leaving it dead. ISO-8601 UTC
+ *  strings compare chronologically as plain strings (same convention the writeTasks
+ *  merge relies on). */
 export function canDispatchTask(task: ProjectTask): boolean {
+  if (isTaskStale(task)) return true;
   if (task.status !== 'todo' && task.status !== 'blocked') return false;
   const dispatched = !!task.dispatchedAt
     && (!task.statusUpdatedAt || task.statusUpdatedAt <= task.dispatchedAt);
