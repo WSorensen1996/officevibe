@@ -19,6 +19,7 @@ import { enrichMessage } from './assistant';
 import { readAgentUsage } from './transcript';
 import { SlackWebhookServer } from './slack';
 import { startBrowserMcp, type BrowserMcpHandle } from './browserMcp';
+import { decryptDef, encryptDef, encryptionAvailable, isValidName, testConnection, type McpServerDef } from './mcp';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 
@@ -869,6 +870,80 @@ ipcMain.handle('slack:setConfig', (_evt, patch: unknown) => {
   const cfg = readConfig();
   if (!cfg.slackEnabled || !cfg.slackSigningSecret) stopSlackServer();
   return { ok: true };
+});
+
+// ─── IPC: MCP server configuration ──────────────────────────────────────────
+// User-managed MCP servers persisted on the app config and merged into each
+// spawned agent's mcp.json (see src/main/mcp.ts + ProjectManager.ensureAgent).
+// Secrets are encrypted at rest; handlers exchange DECRYPTED defs with the
+// renderer (a local, trusted surface — same as the Slack secret in Settings).
+function cleanRecord(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (k.trim() && typeof v === 'string') out[k.trim()] = v;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizeMcpDef(raw: unknown): { value: McpServerDef } | { error: string } {
+  if (!raw || typeof raw !== 'object') return { error: 'invalid server' };
+  const r = raw as Record<string, unknown>;
+  const name = typeof r.name === 'string' ? r.name.trim() : '';
+  if (!name) return { error: 'name is required' };
+  if (!isValidName(name)) return { error: 'name may only contain letters, numbers, _ and -' };
+  const transport = r.transport === 'http' || r.transport === 'sse' ? r.transport : 'stdio';
+  const id = typeof r.id === 'string' && r.id.trim() ? r.id.trim() : `${name}-${Math.random().toString(36).slice(2, 8)}`;
+  const value: McpServerDef = {
+    id,
+    name,
+    enabled: r.enabled !== false,
+    scope: r.scope === 'god' ? 'god' : 'all',
+    transport
+  };
+  if (transport === 'stdio') {
+    const command = typeof r.command === 'string' ? r.command.trim() : '';
+    if (!command) return { error: 'command is required for a local (stdio) server' };
+    value.command = command;
+    value.args = Array.isArray(r.args) ? r.args.filter((a): a is string => typeof a === 'string') : [];
+    value.env = cleanRecord(r.env);
+  } else {
+    const url = typeof r.url === 'string' ? r.url.trim() : '';
+    if (!url) return { error: 'url is required for a remote server' };
+    try { new URL(url); } catch { return { error: 'url is not a valid URL' }; }
+    value.url = url;
+    value.headers = cleanRecord(r.headers);
+  }
+  return { value };
+}
+
+ipcMain.handle('mcp:list', () => ({
+  servers: (readConfig().mcpServers ?? []).map(decryptDef),
+  encryptionAvailable: encryptionAvailable()
+}));
+ipcMain.handle('mcp:save', (_evt, raw: unknown) => {
+  const res = normalizeMcpDef(raw);
+  if ('error' in res) return { ok: false, error: res.error };
+  const list = (readConfig().mcpServers ?? []).filter((s) => s.id !== res.value.id);
+  // Reject a duplicate name on a different id — same name silently clobbers in mcp.json.
+  if (list.some((s) => s.name === res.value.name)) {
+    return { ok: false, error: `a server named "${res.value.name}" already exists` };
+  }
+  list.push(encryptDef(res.value));
+  writeConfig({ mcpServers: list });
+  return { ok: true, servers: list.map(decryptDef) };
+});
+ipcMain.handle('mcp:remove', (_evt, id: unknown) => {
+  if (typeof id !== 'string') return { ok: false, error: 'invalid id' };
+  const list = (readConfig().mcpServers ?? []).filter((s) => s.id !== id);
+  writeConfig({ mcpServers: list });
+  return { ok: true, servers: list.map(decryptDef) };
+});
+ipcMain.handle('mcp:test', (_evt, raw: unknown) => {
+  const res = normalizeMcpDef(raw);
+  if ('error' in res) return { ok: false, error: res.error };
+  // res.value carries plaintext secrets (decryptDef is a no-op on them).
+  return testConnection(res.value);
 });
 
 // ─── IPC: embedded browser pane (user chrome → native WebContentsView) ───────

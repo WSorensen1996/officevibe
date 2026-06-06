@@ -21,7 +21,8 @@ import {
   readdirSync, rmSync, appendFileSync
 } from 'node:fs';
 import { join } from 'node:path';
-import { deriveProjectName } from './config';
+import { deriveProjectName, readConfig } from './config';
+import { mcpServersForAgent } from './mcp';
 import { randomBytes } from 'node:crypto';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -294,33 +295,40 @@ export class ProjectManager {
     };
     const args = ['--append-system-prompt', this.injectedPrompt(meta, dir, root, opts.semanticMemory ?? false)];
 
+    // Resolve which MCP servers this agent receives: the user-configured servers in
+    // scope (every agent for scope 'all'; only the god for scope 'god') plus, for the
+    // god, the built-in browser server. `grantedNames` feeds the permission allow-rules
+    // in hookSettings below (bypassPermissions alone does NOT expose MCP tools); the
+    // merged `mcpServers` map is written to mcp.json.
+    const { servers: userServers, names: userNames } = mcpServersForAgent(readConfig().mcpServers, !!meta.isGod);
+    const mcpServers: Record<string, unknown> = { ...userServers };
+    const grantedNames = [...userNames];
+    if (meta.isGod && this.browserEndpoint) {
+      mcpServers.browser = {
+        type: 'http',
+        url: this.browserEndpoint.url,
+        headers: { 'x-agent-token': this.browserEndpoint.token }
+      };
+      grantedNames.push('browser');
+    }
+
     // Phase 1 — autonomy: attach lifecycle hooks via --settings (no edits to the
-    // user's repo) so the agent reports activity and drains its inbox on Stop.
+    // user's repo) so the agent reports activity and drains its inbox on Stop. The
+    // granted MCP tools are pre-approved here so the agent can call them.
     const sock = this.sockPath();
     const shim = this.shimPath();
     if (sock && shim) {
       env.PROJECT_SOCK = sock;
       const settingsPath = join(dir, 'settings.json');
-      this.writeJson(settingsPath, this.hookSettings(shim, !!meta.isGod));
+      this.writeJson(settingsPath, this.hookSettings(shim, grantedNames));
       args.push('--settings', settingsPath);
     }
 
-    // Give the GOD/orchestrator live control of the embedded browser pane: write
-    // an mcp.json pointing at the in-process browser MCP server and load it via
-    // --mcp-config. Additive (no --strict-mcp-config) so Michael also keeps any
-    // MCP servers the user configured globally. The browser_* tools are
-    // pre-approved in hookSettings(..., isGod) above.
-    if (meta.isGod && this.browserEndpoint) {
+    // Load the merged servers via --mcp-config. Additive (no --strict-mcp-config) so
+    // the agent also keeps any MCP servers the user configured globally for the CLI.
+    if (Object.keys(mcpServers).length > 0) {
       const mcpPath = join(dir, 'mcp.json');
-      this.writeJson(mcpPath, {
-        mcpServers: {
-          browser: {
-            type: 'http',
-            url: this.browserEndpoint.url,
-            headers: { 'x-agent-token': this.browserEndpoint.token }
-          }
-        }
-      });
+      this.writeJson(mcpPath, { mcpServers });
       args.push('--mcp-config', mcpPath);
     }
     return { args, env };
@@ -346,11 +354,13 @@ export class ProjectManager {
     } catch { /* best-effort — never crash a lifecycle handler */ }
   }
 
-  /** Claude Code settings that route every relevant hook through the shim. For
-   *  the god agent we also pre-approve the browser MCP tools — verified that
+  /** Claude Code settings that route every relevant hook through the shim. We also
+   *  pre-approve each granted MCP server's tools (`mcp__<name>__*`) — verified that
    *  bypassPermissions alone does NOT expose MCP tools; an allow rule is required.
-   *  The rule is inert for non-god agents (they aren't given the browser server). */
-  private hookSettings(shim: string, isGod = false): unknown {
+   *  `mcpNames` is the set of servers this agent actually received (browser for the
+   *  god, plus any user-configured servers in scope), so the rules are never broader
+   *  than what's wired in. */
+  private hookSettings(shim: string, mcpNames: string[] = []): unknown {
     const cmd = `node "${shim}"`;
     const entry = (matcher?: string) => ({
       ...(matcher ? { matcher } : {}),
@@ -375,7 +385,9 @@ export class ProjectManager {
     if (usageShim) {
       settings.statusLine = { type: 'command', command: `node "${usageShim}"`, padding: 1 };
     }
-    if (isGod) settings.permissions = { allow: ['mcp__browser__*'] };
+    if (mcpNames.length > 0) {
+      settings.permissions = { allow: mcpNames.map((n) => `mcp__${n}__*`) };
+    }
     return settings;
   }
 

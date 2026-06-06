@@ -1,6 +1,7 @@
 import { app } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import type { McpServerDef } from './mcp';
 
 /** A scheduled auto-dispatch handled by the scheduler. Historically a recurring
  *  "mission" (label/to/body fired every intervalMs); now also backs Tasks-tab
@@ -81,6 +82,9 @@ export interface HarnessConfig {
   slackChannelId?: string;
   /** Local HTTP port the webhook server binds to (default 3847). */
   slackPort?: number;
+  /** User-configured MCP servers wired into spawned agents (see src/main/mcp.ts).
+   *  Secret-bearing values (env/header values) are encrypted at rest. */
+  mcpServers?: McpServerDef[];
 }
 
 const DEFAULTS: HarnessConfig = {
@@ -102,7 +106,8 @@ const DEFAULTS: HarnessConfig = {
   slackSigningSecret: undefined,
   slackBotToken: undefined,
   slackChannelId: undefined,
-  slackPort: undefined
+  slackPort: undefined,
+  mcpServers: []
 };
 
 function configPath(): string {

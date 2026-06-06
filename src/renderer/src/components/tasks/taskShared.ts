@@ -1,0 +1,153 @@
+// Shared task types, constants, and pure helpers for the Kanban board
+// (TasksKanban) and the full-card detail view (TaskDetailPanel). Extracted so
+// both surfaces import one canonical source instead of re-declaring drift-prone
+// copies. Nothing here is React — just data shapes + normalization.
+
+/** A short agent-posted status note shown on a card (mirrors main/preload TaskUpdate). */
+export interface TaskUpdate {
+  ts: string;
+  by: string;
+  kind: 'doing' | 'blocked' | 'done' | 'note';
+  text: string;
+}
+
+/** A card on the task kanban. Mirrors ProjectTask in the main/preload process —
+ *  re-declared locally so the renderer doesn't reach into the preload package
+ *  (same convention as store/config.ts). Structurally compatible with
+ *  window.cth.projectWriteTasks. */
+export interface ProjectTask {
+  id: string;
+  title: string;
+  description?: string;
+  assignee?: string;
+  status: 'todo' | 'doing' | 'blocked' | 'done';
+  dependsOn: string[];
+  priority: number;
+  createdAt: string;
+  /** Agent status notes (display-only here; the harness owns the truth on disk). */
+  updates?: TaskUpdate[];
+  /** ISO of the last status change — stamped on a manual move/edit so the
+   *  main-process merge keeps whichever of human/agent changed status last. */
+  statusUpdatedAt?: string;
+  /** Human-set: hidden from the 4 columns and shown in the ARCHIVED section.
+   *  Independent of `status`, so restoring returns the card to its column. */
+  archived?: boolean;
+}
+
+export type Status = ProjectTask['status'];
+
+export const COLUMNS: { key: Status; label: string; accent: string }[] = [
+  { key: 'todo',    label: 'TODO',    accent: 'var(--cth-sky)' },
+  { key: 'doing',   label: 'DOING',   accent: 'var(--cth-lemon)' },
+  { key: 'blocked', label: 'BLOCKED', accent: 'var(--cth-coral)' },
+  { key: 'done',    label: 'DONE',    accent: 'var(--cth-mint)' }
+];
+
+export const POLL_MS = 5000;
+
+/** Accent per agent-reported update kind (matches the column accents). */
+export const UPDATE_COLOR: Record<TaskUpdate['kind'], string> = {
+  doing: 'var(--cth-lemon)',
+  blocked: 'var(--cth-coral)',
+  done: 'var(--cth-mint)',
+  note: 'var(--cth-ink-500)'
+};
+
+/** A scheduled auto-dispatch for a task. Mirrors ScheduledMission in
+ *  main/config.ts and preload/index.ts — keep the three in sync. Here it is
+ *  always task-linked (taskId set); label/to are a snapshot the scheduler
+ *  refreshes from the live task at fire time. */
+export interface ScheduledMission {
+  id: string;
+  label: string;
+  intervalMs: number;
+  to: string;
+  body: string;
+  enabled: boolean;
+  lastFiredAt?: number;
+  taskId?: string;
+  mode?: 'recurring' | 'once';
+  runAt?: number;
+}
+
+/** What the SCHEDULE controls in the task form resolve to on submit. */
+export type ScheduleSpec =
+  | { mode: 'none' }
+  | { mode: 'once'; runAt: number }
+  | { mode: 'recurring'; intervalMs: number; enabled: boolean };
+
+/** Recurring interval presets (ms) — shown in the form and as card badges. */
+export const INTERVAL_OPTS: { ms: number; label: string }[] = [
+  { ms: 3600000, label: '1h' },
+  { ms: 21600000, label: '6h' },
+  { ms: 86400000, label: '24h' },
+  { ms: 604800000, label: 'weekly' }
+];
+
+export const intervalLabel = (ms: number): string =>
+  INTERVAL_OPTS.find((o) => o.ms === ms)?.label ?? `${Math.round(ms / 3600000)}h`;
+
+/** epoch ms → `YYYY-MM-DDTHH:mm` in LOCAL time for <input type="datetime-local">. */
+export function toLocalInput(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** epoch ms → compact local stamp for a card badge (e.g. "Jun 7, 14:30"). */
+export function shortWhen(ms?: number): string {
+  if (!ms) return '';
+  return new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+export function shortId(): string {
+  return `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/** Deterministic fallback id derived from a task's content (djb2 → base36).
+ *  Used for tasks lacking a valid string id so re-parsing tasks.json on every
+ *  5s poll yields the SAME id — no React key churn / card remount. Unlike
+ *  shortId() (random, for brand-new tasks), this never changes across polls. */
+export function stableId(seed: string): string {
+  let h = 5381;
+  for (let i = 0; i < seed.length; i++) h = (((h << 5) + h) ^ seed.charCodeAt(i)) | 0;
+  return `t-${(h >>> 0).toString(36)}`;
+}
+
+/** Keep only well-formed agent updates (display-only; the harness owns the truth). */
+export function parseUpdates(raw: unknown): TaskUpdate[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const kinds = ['doing', 'blocked', 'done', 'note'] as const;
+  const out = raw.filter((u): u is TaskUpdate =>
+    !!u && typeof u === 'object'
+    && typeof (u as TaskUpdate).text === 'string'
+    && typeof (u as TaskUpdate).by === 'string'
+    && kinds.includes((u as TaskUpdate).kind));
+  return out.length ? out.slice(-20) : undefined;
+}
+
+/** Normalize whatever hive:tasks returns into a typed task array. */
+export function parseTasks(raw: unknown): ProjectTask[] {
+  const list = (raw && typeof raw === 'object' && Array.isArray((raw as { tasks?: unknown }).tasks))
+    ? (raw as { tasks: unknown[] }).tasks
+    : [];
+  return list
+    .filter((t): t is Record<string, unknown> => !!t && typeof t === 'object')
+    .map((t, i) => ({
+      id: typeof t.id === 'string' && t.id
+        ? t.id
+        : stableId(`${typeof t.title === 'string' ? t.title : ''}|${typeof t.createdAt === 'string' ? t.createdAt : ''}|${i}`),
+      title: typeof t.title === 'string' ? t.title : '(untitled)',
+      description: typeof t.description === 'string' ? t.description : undefined,
+      assignee: typeof t.assignee === 'string' ? t.assignee : undefined,
+      status: (['todo', 'doing', 'blocked', 'done'] as const).includes(t.status as Status)
+        ? (t.status as Status) : 'todo',
+      dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.filter((d): d is string => typeof d === 'string') : [],
+      priority: typeof t.priority === 'number' ? t.priority : 3,
+      createdAt: typeof t.createdAt === 'string' ? t.createdAt : new Date().toISOString(),
+      updates: parseUpdates(t.updates),
+      statusUpdatedAt: typeof t.statusUpdatedAt === 'string' ? t.statusUpdatedAt : undefined,
+      // Load-bearing: drop this on poll and the next human persist() un-archives.
+      archived: t.archived === true ? true : undefined
+    }));
+}

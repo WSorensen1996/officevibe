@@ -114,6 +114,21 @@ export interface ProjectRef {
   path: string;
 }
 
+/** A user-configured MCP server (mirrors McpServerDef in src/main/mcp.ts). The
+ *  defs exchanged over IPC are DECRYPTED (secrets in env/headers are plaintext). */
+export interface McpServerDef {
+  id: string;
+  name: string;
+  enabled: boolean;
+  scope: 'all' | 'god';
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+}
+
 export interface HarnessConfig {
   onboardingComplete: boolean;
   /** Default parent directory for newly created projects (the old "harness home"). */
@@ -133,6 +148,7 @@ export interface HarnessConfig {
   sttModel: 'whisper-base.en' | 'whisper-tiny.en';
   missions?: ScheduledMission[];
   notifications?: boolean;
+  mcpServers?: McpServerDef[];
 }
 
 export interface MemoryStatus {
@@ -400,6 +416,20 @@ const api = {
     signingSecret?: string; botToken?: string; channelId?: string; port?: number; enabled?: boolean;
   }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('slack:setConfig', patch),
+
+  // ─── MCP server connections (wired into spawned agents' mcp.json) ────────────
+  /** List configured MCP servers (decrypted) + whether secrets encrypt at rest. */
+  mcpList: (): Promise<{ servers: McpServerDef[]; encryptionAvailable: boolean }> =>
+    ipcRenderer.invoke('mcp:list'),
+  /** Create or update a server (upsert by id); returns the refreshed list. */
+  mcpSave: (def: McpServerDef): Promise<{ ok: boolean; error?: string; servers?: McpServerDef[] }> =>
+    ipcRenderer.invoke('mcp:save', def),
+  /** Delete a server by id; returns the refreshed list. */
+  mcpRemove: (id: string): Promise<{ ok: boolean; error?: string; servers?: McpServerDef[] }> =>
+    ipcRenderer.invoke('mcp:remove', id),
+  /** Live health check: connect and list the server's tools. */
+  mcpTest: (def: McpServerDef): Promise<{ ok: boolean; tools?: string[]; error?: string }> =>
+    ipcRenderer.invoke('mcp:test', def),
 
   // ─── Embedded browser pane (god-driven native WebContentsView, bottom-left) ──
   browser: {

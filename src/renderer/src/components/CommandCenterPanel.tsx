@@ -3,11 +3,11 @@ import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { TasksKanban } from './TasksKanban';
 import { AgentsTab } from './AgentsTab';
+import { McpTab } from './McpTab';
 import { SettingsTab } from './SettingsTab';
 import { UsageMeter } from './UsageMeter';
 import { Select } from './Select';
 import { Icon } from './Icon';
-import { MemoryGraphPanel } from './MemoryGraphPanel';
 import { formatLogEntry, type LogEntry } from './logFormat';
 import { useStore, type Agent } from '@/store/store';
 
@@ -16,22 +16,20 @@ import { useStore, type Agent } from '@/store/store';
  *  here we surface a task board that dispatches & schedules work, the agent
  *  roster, a memory view, and a live activity feed / board / usage meter. */
 
-type CCTab = 'tasks' | 'agents' | 'memory' | 'graph' | 'activity' | 'handbook' | 'settings';
+type CCTab = 'tasks' | 'agents' | 'memory' | 'activity' | 'handbook' | 'connections' | 'settings';
 
 const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'] }[] = [
   { key: 'tasks', label: 'tasks', icon: 'check' },
   { key: 'agents', label: 'agents', icon: 'mcp' },
   { key: 'memory', label: 'memory', icon: 'sparkle' },
-  { key: 'graph', label: 'graph', icon: 'web' },
   { key: 'activity', label: 'activity', icon: 'bell' },
   { key: 'handbook', label: 'commands', icon: 'code' },
+  { key: 'connections', label: 'connections', icon: 'web' },
   { key: 'settings', label: 'settings', icon: 'gear' }
 ];
 
 export function CommandCenterPanel({ agent }: { agent: Agent }) {
   const [tab, setTab] = useState<CCTab>('tasks');
-  // Lifted so the memory-graph tab can jump to a specific agent's memory file.
-  const [selectedMemoryAgent, setSelectedMemoryAgent] = useState<string | null>(null);
 
   return (
     <PixelPanel
@@ -84,18 +82,11 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
       {/* Body */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         {tab === 'tasks' && <TasksKanban />}
-        {tab === 'memory' && (
-          <MemoryTab godId={agent.id} who={selectedMemoryAgent ?? undefined} onWho={setSelectedMemoryAgent} />
-        )}
-        {tab === 'graph' && (
-          <MemoryGraphPanel
-            godId={agent.id}
-            onJumpToMemory={(id) => { setSelectedMemoryAgent(id); setTab('memory'); }}
-          />
-        )}
+        {tab === 'memory' && <MemoryTab godId={agent.id} />}
         {tab === 'activity' && <ActivityTab />}
         {tab === 'handbook' && <HandbookTab />}
         {tab === 'agents' && <AgentsTab />}
+        {tab === 'connections' && <McpTab />}
         {tab === 'settings' && <SettingsTab />}
       </div>
     </PixelPanel>
@@ -104,12 +95,9 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
 
 // ─── Memory tab ──────────────────────────────────────────────────────────────
 
-function MemoryTab({ godId, who: controlledWho, onWho }: { godId: string; who?: string; onWho?: (id: string) => void }) {
+function MemoryTab({ godId }: { godId: string }) {
   const agents = useStore((s) => s.agents);
-  // Selection is controllable from the graph tab; falls back to local state.
-  const [internalWho, setInternalWho] = useState<string>(godId);
-  const who = controlledWho ?? internalWho;
-  const setWho = onWho ?? setInternalWho;
+  const [who, setWho] = useState<string>(godId);
   const [mem, setMem] = useState('');
   const [query, setQuery] = useState('');
   const [searchOut, setSearchOut] = useState('');
@@ -420,11 +408,11 @@ function HandbookTab() {
 
 // ─── small shared bits ───────────────────────────────────────────────────────
 
-function Scroll({ children }: { children: React.ReactNode }) {
+export function Scroll({ children }: { children: React.ReactNode }) {
   return <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 10, background: 'var(--cth-paper-200)' }}>{children}</div>;
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+export function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 9, lineHeight: '12px', color: 'var(--cth-ink-500)', marginBottom: 6 }}>{title}</div>
@@ -433,14 +421,17 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function Muted({ children }: { children: React.ReactNode }) {
+export function Muted({ children }: { children: React.ReactNode }) {
   return <div style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>{children}</div>;
 }
 
-function Pre({ children }: { children: React.ReactNode }) {
+/** Monospace, wrapped, scrollable text block. `maxHeight` caps it (default 200);
+ *  pass `'none'` for a block that grows with its container (e.g. the full-card
+ *  detail view, which scrolls at the panel level instead). */
+export function Pre({ children, maxHeight = 200 }: { children: React.ReactNode; maxHeight?: number | string }) {
   return (
     <pre style={{
-      margin: '6px 0 0', padding: 8, maxHeight: 200, overflow: 'auto',
+      margin: '6px 0 0', padding: 8, maxHeight, overflow: 'auto',
       background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
       fontFamily: 'var(--cth-font-mono)', fontSize: 12, lineHeight: '16px',
       color: 'var(--cth-ink-900)', whiteSpace: 'pre-wrap', wordBreak: 'break-word'

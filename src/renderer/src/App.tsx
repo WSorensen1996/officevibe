@@ -19,10 +19,12 @@ import { LeftTabs } from '@/components/LeftTabs';
 import { ProjectSwitcher } from '@/components/ProjectSwitcher';
 import { SpritePortrait } from '@/components/SpritePortrait';
 import { PixelBadge } from '@/components/PixelBadge';
+import { AttentionCues } from '@/components/AttentionCues';
 import { BrowserPane } from '@/components/BrowserPane';
 import { acquireTerminal } from '@/components/terminalPool';
 import { FullscreenTerminal } from '@/components/FullscreenTerminal';
 import { FullscreenFileEditor } from '@/components/FullscreenFileEditor';
+import { TaskDetailPanel } from '@/components/TaskDetailPanel';
 
 /** The window is frameless on macOS (titleBarStyle: hiddenInset) and the in-app
  *  title bar is gone, so the traffic lights would float over the content with no
@@ -46,6 +48,7 @@ export function App() {
   const setSidebarWidth = useStore(s => s.setSidebarWidth);
   const leftTab = useStore(s => s.leftTab);
   const setLeftTab = useStore(s => s.setLeftTab);
+  const openTaskId = useStore(s => s.openTaskId);
   const browserActive = useStore(s => s.browserActive);
 
   const [config, setConfig] = useState<HarnessConfig | null>(null);
@@ -153,7 +156,7 @@ export function App() {
                   title={`selected agent — drives the terminal/files/messages/logs tabs`}
                   style={{
                     display: 'inline-flex', alignItems: 'center', gap: 6,
-                    maxWidth: 260, padding: '3px 8px',
+                    maxWidth: 300, padding: '3px 8px',
                     background: 'var(--cth-cream-200)',
                     boxShadow: `inset 0 0 0 1px var(--cth-ink-700)`
                   }}
@@ -185,6 +188,9 @@ export function App() {
                       }}>{(agent.action || '').trim() || agent.description}</span>
                     </div>
                   </div>
+                  {/* Pulsing cues when the selected agent is browsing or needs you —
+                      one click jumps to the relevant tab. */}
+                  <AttentionCues agent={agent} />
                 </div>
               ) : (
                 <span style={{
@@ -194,8 +200,9 @@ export function App() {
               )}
             </div>
           </div>
-          {/* Tab bar: office + the selected agent's workspace + the shared browser. */}
-          <LeftTabs current={leftTab} onChange={setLeftTab} browserActive={browserActive} accent={agent?.accent} />
+          {/* Tab bar: office + the selected agent's workspace + the shared browser
+              + a transient TASK tab when a card's full view is open. */}
+          <LeftTabs current={leftTab} onChange={setLeftTab} browserActive={browserActive} accent={agent?.accent} hasOpenTask={!!openTaskId} />
 
           <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
             {/* Office tab — kept mounted (display toggle) so Pixi keeps its avatars. */}
@@ -261,6 +268,15 @@ export function App() {
                     </PixelButton>
                   </PixelPanel>
                 )}
+              </div>
+            )}
+
+            {/* Task full-card view — opened from the Kanban board (right column)
+                into this roomy left area; the board stays visible beside it.
+                Plain DOM, so conditional mount is cheap. */}
+            {leftTab === 'task' && (
+              <div style={{ position: 'absolute', inset: 0 }}>
+                <TaskDetailPanel />
               </div>
             )}
           </div>

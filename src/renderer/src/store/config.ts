@@ -7,6 +7,21 @@ export interface ProjectRef {
   path: string;
 }
 
+/** A user-configured MCP server (mirrors McpServerDef in src/main/mcp.ts). Defs
+ *  exchanged over IPC are decrypted — secrets in env/headers are plaintext. */
+export interface McpServerDef {
+  id: string;
+  name: string;
+  enabled: boolean;
+  scope: 'all' | 'god';
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+}
+
 export interface HarnessConfig {
   onboardingComplete: boolean;
   /** Default parent directory for newly created projects (the old "harness home"). */

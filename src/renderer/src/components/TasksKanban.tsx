@@ -1,298 +1,49 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { PixelBadge } from './PixelBadge';
 import { Icon } from './Icon';
 import { MicButton } from './MicButton';
-import { useStore } from '@/store/store';
+import { useStore, NEW_TASK_ID } from '@/store/store';
+import { useTasks } from '@/hooks/useTasks';
+import {
+  type ProjectTask,
+  type TaskUpdate,
+  type Status,
+  type ScheduledMission,
+  type ScheduleSpec,
+  COLUMNS,
+  UPDATE_COLOR,
+  INTERVAL_OPTS,
+  intervalLabel,
+  toLocalInput,
+  shortWhen,
+  shortId
+} from './tasks/taskShared';
 
-/** A short agent-posted status note shown on a card (mirrors main/preload TaskUpdate). */
-export interface TaskUpdate {
-  ts: string;
-  by: string;
-  kind: 'doing' | 'blocked' | 'done' | 'note';
-  text: string;
-}
-
-/** A card on the task kanban. Mirrors ProjectTask in the main/preload process —
- *  re-declared locally so the renderer doesn't reach into the preload package
- *  (same convention as store/config.ts). Structurally compatible with
- *  window.cth.projectWriteTasks. */
-export interface ProjectTask {
-  id: string;
-  title: string;
-  description?: string;
-  assignee?: string;
-  status: 'todo' | 'doing' | 'blocked' | 'done';
-  dependsOn: string[];
-  priority: number;
-  createdAt: string;
-  /** Agent status notes (display-only here; the harness owns the truth on disk). */
-  updates?: TaskUpdate[];
-  /** ISO of the last status change — stamped on a manual move/edit so the
-   *  main-process merge keeps whichever of human/agent changed status last. */
-  statusUpdatedAt?: string;
-  /** Human-set: hidden from the 4 columns and shown in the ARCHIVED section.
-   *  Independent of `status`, so restoring returns the card to its column. */
-  archived?: boolean;
-}
-
-type Status = ProjectTask['status'];
-
-const COLUMNS: { key: Status; label: string; accent: string }[] = [
-  { key: 'todo',    label: 'TODO',    accent: 'var(--cth-sky)' },
-  { key: 'doing',   label: 'DOING',   accent: 'var(--cth-lemon)' },
-  { key: 'blocked', label: 'BLOCKED', accent: 'var(--cth-coral)' },
-  { key: 'done',    label: 'DONE',    accent: 'var(--cth-mint)' }
-];
-
-const POLL_MS = 5000;
-
-/** A scheduled auto-dispatch for a task. Mirrors ScheduledMission in
- *  main/config.ts and preload/index.ts — keep the three in sync. Here it is
- *  always task-linked (taskId set); label/to are a snapshot the scheduler
- *  refreshes from the live task at fire time. */
-interface ScheduledMission {
-  id: string;
-  label: string;
-  intervalMs: number;
-  to: string;
-  body: string;
-  enabled: boolean;
-  lastFiredAt?: number;
-  taskId?: string;
-  mode?: 'recurring' | 'once';
-  runAt?: number;
-}
-
-/** What the SCHEDULE controls in the task form resolve to on submit. */
-type ScheduleSpec =
-  | { mode: 'none' }
-  | { mode: 'once'; runAt: number }
-  | { mode: 'recurring'; intervalMs: number; enabled: boolean };
-
-/** Recurring interval presets (ms) — shown in the form and as card badges. */
-const INTERVAL_OPTS: { ms: number; label: string }[] = [
-  { ms: 3600000, label: '1h' },
-  { ms: 21600000, label: '6h' },
-  { ms: 86400000, label: '24h' },
-  { ms: 604800000, label: 'weekly' }
-];
-
-const intervalLabel = (ms: number): string =>
-  INTERVAL_OPTS.find((o) => o.ms === ms)?.label ?? `${Math.round(ms / 3600000)}h`;
-
-/** epoch ms → `YYYY-MM-DDTHH:mm` in LOCAL time for <input type="datetime-local">. */
-function toLocalInput(ms: number): string {
-  const d = new Date(ms);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** epoch ms → compact local stamp for a card badge (e.g. "Jun 7, 14:30"). */
-function shortWhen(ms?: number): string {
-  if (!ms) return '';
-  return new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
-
-function shortId(): string {
-  return `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-}
-
-/** Deterministic fallback id derived from a task's content (djb2 → base36).
- *  Used for tasks lacking a valid string id so re-parsing tasks.json on every
- *  5s poll yields the SAME id — no React key churn / card remount. Unlike
- *  shortId() (random, for brand-new tasks), this never changes across polls. */
-function stableId(seed: string): string {
-  let h = 5381;
-  for (let i = 0; i < seed.length; i++) h = (((h << 5) + h) ^ seed.charCodeAt(i)) | 0;
-  return `t-${(h >>> 0).toString(36)}`;
-}
-
-/** Keep only well-formed agent updates (display-only; the harness owns the truth). */
-function parseUpdates(raw: unknown): TaskUpdate[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const kinds = ['doing', 'blocked', 'done', 'note'] as const;
-  const out = raw.filter((u): u is TaskUpdate =>
-    !!u && typeof u === 'object'
-    && typeof (u as TaskUpdate).text === 'string'
-    && typeof (u as TaskUpdate).by === 'string'
-    && kinds.includes((u as TaskUpdate).kind));
-  return out.length ? out.slice(-20) : undefined;
-}
-
-/** Normalize whatever hive:tasks returns into a typed task array. */
-function parseTasks(raw: unknown): ProjectTask[] {
-  const list = (raw && typeof raw === 'object' && Array.isArray((raw as { tasks?: unknown }).tasks))
-    ? (raw as { tasks: unknown[] }).tasks
-    : [];
-  return list
-    .filter((t): t is Record<string, unknown> => !!t && typeof t === 'object')
-    .map((t, i) => ({
-      id: typeof t.id === 'string' && t.id
-        ? t.id
-        : stableId(`${typeof t.title === 'string' ? t.title : ''}|${typeof t.createdAt === 'string' ? t.createdAt : ''}|${i}`),
-      title: typeof t.title === 'string' ? t.title : '(untitled)',
-      description: typeof t.description === 'string' ? t.description : undefined,
-      assignee: typeof t.assignee === 'string' ? t.assignee : undefined,
-      status: (['todo', 'doing', 'blocked', 'done'] as const).includes(t.status as Status)
-        ? (t.status as Status) : 'todo',
-      dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.filter((d): d is string => typeof d === 'string') : [],
-      priority: typeof t.priority === 'number' ? t.priority : 3,
-      createdAt: typeof t.createdAt === 'string' ? t.createdAt : new Date().toISOString(),
-      updates: parseUpdates(t.updates),
-      statusUpdatedAt: typeof t.statusUpdatedAt === 'string' ? t.statusUpdatedAt : undefined,
-      // Load-bearing: drop this on poll and the next human persist() un-archives.
-      archived: t.archived === true ? true : undefined
-    }));
-}
+export type { ProjectTask, TaskUpdate } from './tasks/taskShared';
 
 /**
- * Task kanban over hive/tasks.json. Polls every 5s, lets the human add tasks
- * (assignee from the live roster, priority, dependsOn), and dispatch a card
- * directly to its assignee's inbox — the board is the dispatch control surface.
+ * Task kanban over hive/tasks.json. The live ledger + every mutation live in the
+ * shared `useTasks` hook (one poller, one subscription) so this board and the
+ * left-column full-card view (TaskDetailPanel) stay in sync. The human can add
+ * tasks (assignee from the live roster, priority, dependsOn), dispatch a card
+ * directly to its assignee's inbox, or open a card in full — the board is the
+ * dispatch control surface.
  */
 export function TasksKanban() {
   const agents = useStore((s) => s.agents);
-  const [tasks, setTasks] = useState<ProjectTask[]>([]);
-  const [adding, setAdding] = useState(false);
-  // Transient feedback from a card/create dispatch (auto-clears after 5s).
-  const [dispatchMsg, setDispatchMsg] = useState<string | null>(null);
-  // The task currently open in the edit form (null = not editing). Mutually
-  // exclusive with `adding` — the same inline form serves both.
-  const [editing, setEditing] = useState<ProjectTask | null>(null);
-  // Task schedules — these live in main-process config (the scheduler owns them).
-  const [missions, setMissions] = useState<ScheduledMission[]>([]);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const refresh = useCallback(async () => {
-    try { setTasks(parseTasks(await window.cth.projectTasks())); } catch { /* keep last good */ }
-  }, []);
-
-  useEffect(() => {
-    refresh();
-    timer.current = setInterval(refresh, POLL_MS);
-    return () => { if (timer.current) clearInterval(timer.current); };
-  }, [refresh]);
-
-  // An agent posting a task-update flips the card live (~1.5s) instead of waiting
-  // on the 5s poll: re-pull so the view stays byte-identical to disk.
-  useEffect(() => window.cth.onProjectTaskUpdated(() => refresh()), [refresh]);
-
-  // Load schedules once, then re-list whenever one fires so a spent one-shot
-  // flips to "fired" on its card without a manual refresh.
-  useEffect(() => {
-    const load = (): void => { window.cth.listMissions().then(setMissions).catch(() => { /* noop */ }); };
-    load();
-    return window.cth.onSchedulerFired(() => load());
-  }, []);
-
-  const persist = useCallback(async (next: ProjectTask[]) => {
-    setTasks(next); // optimistic
-    try { await window.cth.projectWriteTasks(next); } catch { refresh(); }
-  }, [refresh]);
-
-  const persistMissions = useCallback(async (next: ScheduledMission[]) => {
-    setMissions(next); // optimistic
-    try { await window.cth.saveMissions(next); } catch { /* noop */ }
-  }, []);
-
-  const missionFor = useCallback(
-    (taskId: string): ScheduledMission | undefined => missions.find((m) => m.taskId === taskId),
-    [missions]
-  );
-
-  // Reconcile a task's linked schedule from the form's ScheduleSpec: 'none'
-  // drops any existing mission; otherwise upsert one keyed to the task. The
-  // scheduler re-reads the live task at fire time, so label/to here are only a
-  // best-effort snapshot. A freshly-set one-time fire clears lastFiredAt so it
-  // can arm; recurring keeps its cadence (lastFiredAt) across edits.
-  const syncTaskMission = useCallback((task: ProjectTask, spec: ScheduleSpec) => {
-    const existing = missions.find((m) => m.taskId === task.id);
-    if (spec.mode === 'none') {
-      if (existing) persistMissions(missions.filter((m) => m.id !== existing.id));
-      return;
-    }
-    const next: ScheduledMission = {
-      id: existing?.id ?? `m_${Date.now().toString(36)}`,
-      taskId: task.id,
-      label: task.title,
-      to: task.assignee ?? 'god',
-      body: '',
-      mode: spec.mode,
-      intervalMs: spec.mode === 'recurring' ? spec.intervalMs : 0,
-      runAt: spec.mode === 'once' ? spec.runAt : undefined,
-      enabled: spec.mode === 'recurring' ? spec.enabled : true,
-      lastFiredAt: spec.mode === 'recurring' ? existing?.lastFiredAt : undefined
-    };
-    persistMissions(existing
-      ? missions.map((m) => (m.id === existing.id ? next : m))
-      : [...missions, next]);
-  }, [missions, persistMissions]);
-
-  const addTask = useCallback((t: ProjectTask, schedule: ScheduleSpec) => {
-    persist([...tasks, t]);
-    syncTaskMission(t, schedule);
-    setAdding(false);
-  }, [tasks, persist, syncTaskMission]);
-
-  // Replace a task in place. Preserve harness-owned `updates` (the form never
-  // carries them) and only re-stamp `statusUpdatedAt` when the human actually
-  // changed the column, so the main-process merge keeps the latest writer.
-  const saveEdit = useCallback((t: ProjectTask, schedule: ScheduleSpec) => {
-    persist(tasks.map((x) => (x.id === t.id
-      ? { ...t, updates: x.updates, statusUpdatedAt: x.status === t.status ? x.statusUpdatedAt : new Date().toISOString() }
-      : x)));
-    syncTaskMission(t, schedule);
-    setEditing(null);
-  }, [tasks, persist, syncTaskMission]);
-
-  const deleteTask = useCallback((id: string) => {
-    const m = missions.find((x) => x.taskId === id);
-    if (m) persistMissions(missions.filter((x) => x.id !== m.id)); // drop its schedule too
-    persist(tasks.filter((x) => x.id !== id)); // dropping the task drops its updates — intended
-    setEditing(null);
-  }, [tasks, persist, missions, persistMissions]);
-
-  const moveTask = useCallback((id: string, status: Status) => {
-    persist(tasks.map((t) => (t.id === id ? { ...t, status, statusUpdatedAt: new Date().toISOString() } : t)));
-  }, [tasks, persist]);
-
-  // Archive: hide the card from the board (kept on disk, restorable) and drop its
-  // linked schedule so it stops auto-dispatching — same mission cleanup as delete.
-  // Status is left untouched so a restore returns it to its original column.
-  const archiveTask = useCallback((id: string) => {
-    const m = missions.find((x) => x.taskId === id);
-    if (m) persistMissions(missions.filter((x) => x.id !== m.id));
-    persist(tasks.map((t) => (t.id === id ? { ...t, archived: true } : t)));
-    setEditing(null);
-  }, [tasks, persist, missions, persistMissions]);
-
-  const unarchiveTask = useCallback((id: string) => {
-    persist(tasks.map((t) => (t.id === id ? { ...t, archived: false } : t)));
-  }, [tasks, persist]);
-
-  // Send a card straight to its assignee's inbox (Michael if unassigned). Embeds
-  // [task:id] so the worker can post status updates back onto THIS card, and
-  // flips the floor started so the inbox wake-nudge loop delivers it even when
-  // auto-pilot is off (same gate the old Floor dispatch box relied on).
-  const dispatchTask = useCallback(async (t: ProjectTask) => {
-    const desc = t.description?.trim() ? t.description.trim() : '(no description)';
-    const to = t.assignee ?? 'god';
-    const body = `Task: ${t.title} [task:${t.id}]\nContext: ${desc}\n`;
-    const res = await window.cth.projectSend(
-      { to, act: 'request', subject: 'Task from you', body }, 'human');
-    if (!res.ok) {
-      setDispatchMsg(`dispatch failed: ${res.error ?? '?'}`);
-    } else {
-      useStore.getState().startFloor();
-      const name = to === 'god' ? 'Michael' : (agents.find((a) => a.id === to)?.name ?? to);
-      setDispatchMsg((res.delivered ?? 0) === 0
-        ? '⚠ no active agent received this'
-        : `dispatched to ${name}`);
-    }
-    setTimeout(() => setDispatchMsg(null), 5000);
-  }, [agents]);
+  const openTask = useStore((s) => s.openTask);
+  const {
+    tasks,
+    dispatchMsg,
+    missionFor,
+    deleteTask,
+    moveTask,
+    archiveTask,
+    unarchiveTask,
+    dispatchTask
+  } = useTasks();
 
   const nameFor = (id?: string): string | undefined =>
     id ? (agents.find((a) => a.id === id)?.name ?? id) : undefined;
@@ -314,31 +65,16 @@ export function TasksKanban() {
         </span>
         {dispatchMsg && <span style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>{dispatchMsg}</span>}
         <PixelButton
-          variant={adding ? 'secondary' : 'primary'}
+          variant="primary"
           size="sm"
-          onClick={() => { setEditing(null); setAdding((v) => !v); }}
+          onClick={() => openTask(NEW_TASK_ID, 'edit')}
           style={{ marginLeft: 'auto' }}
         >
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <Icon name={adding ? 'x' : 'plus'} /> {adding ? 'cancel' : 'add task'}
+            <Icon name="plus" /> add task
           </span>
         </PixelButton>
       </div>
-
-      {(adding || editing) && (
-        <AddTaskForm
-          key={editing?.id ?? 'new'}
-          agents={agents}
-          existing={editing ? tasks.filter((t) => t.id !== editing.id) : tasks}
-          initial={editing ?? undefined}
-          initialMission={editing ? missionFor(editing.id) : undefined}
-          onCancel={() => { setAdding(false); setEditing(null); }}
-          onSubmit={editing ? saveEdit : addTask}
-          onCreateAndDispatch={editing ? undefined : (t, schedule) => { addTask(t, schedule); dispatchTask(t); }}
-          onDelete={editing ? () => deleteTask(editing.id) : undefined}
-          onArchive={editing ? () => archiveTask(editing.id) : undefined}
-        />
-      )}
 
       {/* Columns */}
       <div style={{
@@ -372,7 +108,8 @@ export function TasksKanban() {
                     onMove={(s) => moveTask(t.id, s)}
                     onDispatch={() => dispatchTask(t)}
                     onArchive={() => archiveTask(t.id)}
-                    onEdit={() => { setAdding(false); setEditing(t); }}
+                    onEdit={() => openTask(t.id, 'edit')}
+                    onOpen={() => openTask(t.id, 'view')}
                   />
                 ))}
               </div>
@@ -466,15 +203,7 @@ function ArchivedTaskRow({ task, onRestore, onDelete }: {
 
 // ─── Card ────────────────────────────────────────────────────────────────────
 
-/** Accent per agent-reported update kind (matches the column accents). */
-const UPDATE_COLOR: Record<TaskUpdate['kind'], string> = {
-  doing: 'var(--cth-lemon)',
-  blocked: 'var(--cth-coral)',
-  done: 'var(--cth-mint)',
-  note: 'var(--cth-ink-500)'
-};
-
-function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, onEdit }: {
+function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, onEdit, onOpen }: {
   task: ProjectTask;
   assigneeName?: string;
   mission?: ScheduledMission;
@@ -482,6 +211,7 @@ function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, 
   onDispatch: () => void;
   onArchive: () => void;
   onEdit: () => void;
+  onOpen: () => void;
 }) {
   const pr = Math.max(1, Math.min(5, task.priority));
   // Dispatch sends the card to its assignee's inbox; once a task is moving
@@ -611,6 +341,16 @@ function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, 
           </PixelButton>
         )}
         <button
+          onClick={onOpen}
+          title="Open full card"
+          style={{
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+            padding: '3px 7px 2px', border: 'none', cursor: 'pointer',
+            background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+            color: 'var(--cth-ink-900)'
+          }}
+        ><Icon name="expand" /></button>
+        <button
           onClick={onArchive}
           title="Archive task (file it away — restorable from the ARCHIVED section)"
           style={{
@@ -625,7 +365,7 @@ function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, 
   );
 }
 
-function PriorityDots({ level }: { level: number }) {
+export function PriorityDots({ level }: { level: number }) {
   // 1 = lowest, 5 = highest. Warmer fill as priority climbs.
   const color = level >= 4 ? 'var(--cth-coral)' : level === 3 ? 'var(--cth-lemon)' : 'var(--cth-mint)';
   return (
@@ -643,7 +383,7 @@ function PriorityDots({ level }: { level: number }) {
 
 // ─── Add-task form ─────────────────────────────────────────────────────────--
 
-function AddTaskForm({ agents, existing, initial, initialMission, onCancel, onSubmit, onCreateAndDispatch, onDelete, onArchive }: {
+export function AddTaskForm({ agents, existing, initial, initialMission, onCancel, onSubmit, onCreateAndDispatch, onDelete, onArchive }: {
   agents: { id: string; name: string; isGod?: boolean }[];
   existing: ProjectTask[];
   /** When set, the form edits this task instead of creating a new one. */

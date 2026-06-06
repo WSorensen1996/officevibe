@@ -88,9 +88,15 @@ export interface QueuedMessage {
 }
 
 /** Which view fills the left column. `office` is the floor + memory overlay and
- *  `browser` is the shared native browser pane; the other four are the selected
- *  agent's workspace (its terminal, files, messages, and logs). */
-export type LeftTab = 'office' | 'terminal' | 'browser' | 'files' | 'messages' | 'logs';
+ *  `browser` is the shared native browser pane; the next four are the selected
+ *  agent's workspace (its terminal, files, messages, and logs); `task` is the
+ *  transient full-card view opened from the Kanban board (see `openTaskId`). */
+export type LeftTab = 'office' | 'terminal' | 'browser' | 'files' | 'messages' | 'logs' | 'task';
+
+/** Sentinel `openTaskId` value meaning "the left task panel is in CREATE mode"
+ *  (no real task yet). `shortId()` only ever emits `t-…` ids, so this can never
+ *  collide with a real task id. Reuses the whole open/close/transient-tab flow. */
+export const NEW_TASK_ID = '__new__';
 
 /** The four left tabs that render the selected agent's workspace (vs the shared
  *  `office`/`browser` views). */
@@ -117,8 +123,20 @@ interface State {
   fullscreenAgentId: string | null;
   fullscreenFilePath: string | null;
   sidebarWidth: number;
-  /** Which view fills the left column (office floor vs browser pane). Persisted. */
+  /** Which view fills the left column (office floor vs browser pane). Persisted
+   *  (except the transient `task` view, which is never persisted). */
   leftTab: LeftTab;
+  /** The task whose full card is open in the left-column `task` view, or null.
+   *  May be the `NEW_TASK_ID` sentinel to mean CREATE mode (no real task yet).
+   *  Transient (not persisted). */
+  openTaskId: string | null;
+  /** Whether the open task lands in the read view or straight in the edit form —
+   *  lets the board offer two entry points (title click → edit, expand → view).
+   *  Transient (not persisted). */
+  openTaskMode: 'view' | 'edit';
+  /** The left tab that was active before a card was opened, so closing the
+   *  full-card view returns the user where they were. Transient. */
+  prevLeftTab: LeftTab;
   /** True while Michael is actively using the browser — drives the Browser tab
    *  badge so the user knows to flick over. Transient (not persisted). */
   browserActive: boolean;
@@ -165,6 +183,11 @@ interface State {
   setFullscreenFile: (path: string | null) => void;
   setSidebarWidth: (px: number) => void;
   setLeftTab: (tab: LeftTab) => void;
+  /** Open a task's full card in the left column (stashing the current tab to
+   *  return to), or close it (null) and restore the previous tab. Pass
+   *  `mode: 'edit'` to land directly in the edit form; defaults to the read view.
+   *  Use the `NEW_TASK_ID` sentinel as `id` to open the panel in CREATE mode. */
+  openTask: (id: string | null, mode?: 'view' | 'edit') => void;
   setBrowserActive: (active: boolean) => void;
   /** Drop persisted agents whose PTY is no longer alive in the main process.
    *  Called once at startup so a renderer reload (e.g. after the laptop sleeps)
@@ -330,6 +353,9 @@ export const useStore = create<State>((set) => ({
   fullscreenFilePath: null,
   sidebarWidth: initialSidebarWidth,
   leftTab: initialLeftTab,
+  openTaskId: null,
+  openTaskMode: 'view',
+  prevLeftTab: initialLeftTab,
   browserActive: false,
   godStatus: 'booting',
   messageQueues: initialQueues,
@@ -454,9 +480,23 @@ export const useStore = create<State>((set) => ({
     set({ sidebarWidth: clamped });
   },
   setLeftTab: (tab) => {
-    try { window.localStorage.setItem(LS_LEFT_TAB, tab); } catch { /* noop */ }
+    // The transient `task` view is never persisted — a reload must never land on
+    // a full-card view for a task that may no longer exist (initialLeftTab's
+    // whitelist also excludes it as a second line of defense).
+    if (tab !== 'task') {
+      try { window.localStorage.setItem(LS_LEFT_TAB, tab); } catch { /* noop */ }
+    }
     set({ leftTab: tab });
   },
+  openTask: (id, mode = 'view') =>
+    set((s) => {
+      if (id === null) {
+        return { openTaskId: null, leftTab: s.prevLeftTab };
+      }
+      // Stash the current real tab once so reopening doesn't lose it.
+      const prevLeftTab = s.leftTab === 'task' ? s.prevLeftTab : s.leftTab;
+      return { openTaskId: id, openTaskMode: mode, leftTab: 'task', prevLeftTab };
+    }),
   setBrowserActive: (active) => set({ browserActive: active })
 }));
 

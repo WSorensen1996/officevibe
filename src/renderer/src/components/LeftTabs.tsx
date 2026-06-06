@@ -20,6 +20,9 @@ export interface LeftTabsProps {
    *  agent tabs (terminal/files/messages/logs) so it reads as "this agent". The
    *  shared office/browser tabs keep the neutral sky accent. */
   accent?: AccentColorName;
+  /** A task's full card is open — append a transient TASK tab to the bar. It
+   *  disappears again when the card is closed (the tab is never persisted). */
+  hasOpenTask?: boolean;
 }
 
 /**
@@ -29,7 +32,11 @@ export interface LeftTabsProps {
  * A pulsing dot appears on the Browser tab while Michael is browsing and you're
  * looking at another tab.
  */
-export function LeftTabs({ current, onChange, browserActive, accent }: LeftTabsProps) {
+export function LeftTabs({ current, onChange, browserActive, accent, hasOpenTask }: LeftTabsProps) {
+  // The TASK tab is transient — only present while a card is open, appended last.
+  const tabs = hasOpenTask
+    ? [...TABS, { key: 'task' as const, label: 'task', icon: 'expand' as IconName }]
+    : TABS;
   return (
     <div style={{
       display: 'flex',
@@ -38,7 +45,7 @@ export function LeftTabs({ current, onChange, browserActive, accent }: LeftTabsP
       boxShadow: 'inset 0 -2px 0 var(--cth-ink-900)',
       flexShrink: 0
     }}>
-      {TABS.map(t => {
+      {tabs.map(t => {
         const active = current === t.key;
         const showBadge = t.key === 'browser' && browserActive && !active;
         // Agent tabs adopt the selected agent's accent; shared views stay sky.

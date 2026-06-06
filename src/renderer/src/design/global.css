@@ -69,6 +69,42 @@ canvas, img, svg { image-rendering: pixelated; image-rendering: crisp-edges; }
   * { animation-duration: 0s !important; transition-duration: 0s !important; }
 }
 
+/* Markdown rendering (TaskDetailPanel) — scoped so the pixel theme tokens apply
+ * to react-markdown's plain HTML output. Block code/quotes get the same inset
+ * border as the app's panels; inline code gets a subtle chip. */
+.cth-md { font-family: var(--cth-font-ui); font-size: 13px; line-height: 18px; color: var(--cth-ink-900); word-break: break-word; overflow-wrap: anywhere; }
+.cth-md > :first-child { margin-top: 0; }
+.cth-md > :last-child { margin-bottom: 0; }
+.cth-md p { margin: 6px 0; }
+.cth-md h1, .cth-md h2, .cth-md h3, .cth-md h4 {
+  font-family: var(--cth-font-display); color: var(--cth-ink-900);
+  line-height: 16px; margin: 12px 0 6px;
+}
+.cth-md h1 { font-size: 12px; }
+.cth-md h2 { font-size: 11px; }
+.cth-md h3, .cth-md h4 { font-size: 10px; }
+.cth-md ul, .cth-md ol { margin: 6px 0; padding-left: 20px; }
+.cth-md li { margin: 2px 0; }
+.cth-md a { color: var(--cth-sky); text-decoration: underline; }
+.cth-md code {
+  font-family: var(--cth-font-mono); font-size: 12px;
+  background: var(--cth-cream-200); box-shadow: inset 0 0 0 1px var(--cth-ink-300);
+  padding: 0 3px;
+}
+.cth-md pre {
+  margin: 8px 0; padding: 8px; overflow-x: auto;
+  background: var(--cth-paper-100); box-shadow: inset 0 0 0 1px var(--cth-ink-300);
+}
+.cth-md pre code { background: none; box-shadow: none; padding: 0; font-size: 12px; line-height: 16px; }
+.cth-md blockquote {
+  margin: 8px 0; padding: 2px 10px; color: var(--cth-ink-700);
+  box-shadow: inset 3px 0 0 var(--cth-ink-300);
+}
+.cth-md hr { border: none; border-top: 1px solid var(--cth-ink-300); margin: 10px 0; }
+.cth-md table { border-collapse: collapse; margin: 8px 0; }
+.cth-md th, .cth-md td { border: 1px solid var(--cth-ink-300); padding: 3px 6px; text-align: left; }
+.cth-md img { max-width: 100%; }
+
 /* xterm: disable font ligatures.
  * Some browsers (e.g. Firefox 130+) treat sequences like "ff"/"ft"/"fi" as
  * ligatures, which breaks xterm's per-char width measuring: an "f" gets measured
