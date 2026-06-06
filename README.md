@@ -52,6 +52,20 @@ Runtime project data (your agents, boards, logs, per-agent settings) is written 
 
 If you find a security issue, please open a GitHub issue (or email the maintainer) rather than disclosing it publicly first.
 
+## Acknowledgements
+
+OfficeVibe is derived from [`shahar061/the-office`](https://github.com/shahar061/the-office)
+(ISC) — the pixel-art office-visualization engine it ports lives under
+[`src/renderer/src/scene/office/`](src/renderer/src/scene/office/). Pixel art is by
+**LimeZu** and **Donarg**. See [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md) and
+[ATTRIBUTION.md](src/renderer/src/assets/ATTRIBUTION.md) for full credits.
+
 ## License
 
-[MIT](./LICENSE) © 2026 William Sorensen
+Original OfficeVibe code is [MIT](./LICENSE) © 2026 William Sorensen. The project
+also bundles third-party material under different terms — **ISC** code ported from
+`shahar061/the-office`, and **non-commercial-only** pixel art (LimeZu / Donarg).
+Those terms are **not** overridden by the MIT grant; see
+[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md). As a result OfficeVibe as
+distributed is **for non-commercial use** unless the encumbered assets are replaced
+or separately licensed.

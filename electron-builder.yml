@@ -1,4 +1,4 @@
-appId: com.officevibe.app
+appId: io.github.wsorensen1996.officevibe
 productName: OfficeVibe
 
 # Notarize + staple after signing, but only when APPLE_* creds are in the env

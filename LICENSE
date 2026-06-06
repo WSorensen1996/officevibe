@@ -19,3 +19,25 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+================================================================================
+SCOPE & THIRD-PARTY MATERIAL
+================================================================================
+
+The MIT grant above applies to the original code authored for OfficeVibe. It
+does NOT, by itself, cover the following bundled third-party material, which is
+licensed separately. See THIRD-PARTY-NOTICES.md for the full texts.
+
+1. Derived code (ISC). OfficeVibe is derived from shahar061/the-office
+   (https://github.com/shahar061/the-office), Copyright (c) 2026 shahar061,
+   licensed under ISC. Portions under src/renderer/src/scene/office/ and the
+   Tiled maps under src/renderer/src/assets/maps/ are ported/adapted from it and
+   remain subject to the ISC license (which is compatible with MIT but requires
+   retaining the original copyright and permission notice).
+
+2. Pixel-art assets (NON-COMMERCIAL). The assets under
+   src/renderer/src/assets/tilesets/ and src/renderer/src/assets/characters/ are
+   LimeZu (FREE VERSION) and Donarg assets, licensed for NON-COMMERCIAL use only.
+   They are NOT covered by the MIT grant above and may not be used commercially
+   without obtaining the appropriate paid license or replacing them.
