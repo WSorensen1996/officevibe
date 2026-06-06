@@ -328,9 +328,7 @@ export function OfficeFloor() {
       const endBreak = (id: string, rt: Runtime): void => {
         releaseBreak(rt);
         rt.character.hideThought();
-        const agent = agentById(id);
-        if (agent?.isGod) rt.character.sitAtDesk();
-        else rt.character.startWandering();
+        rt.character.startWandering();
       };
 
       const startBreak = (id: string, rt: Runtime): void => {
@@ -529,7 +527,7 @@ export function OfficeFloor() {
           case 'success':
             c.setStatusGlyph('success');
             c.hideThought();
-            if (agent.isGod) c.sitAtDesk(); else c.startWandering();
+            c.startWandering();
             break;
           case 'ghost':
             c.setStatusGlyph('none');
@@ -539,9 +537,10 @@ export function OfficeFloor() {
           case 'idle':
           default:
             c.setStatusGlyph('none');
-            // The god runs the floor from its desk; everyone else wanders when idle.
-            if (agent.isGod) { c.sitAtDesk(); c.showThought(liveActivity(agent, 'running the floor')); }
-            else { c.startWandering(); c.showThought(liveActivity(agent, 'idle')); }
+            // Everyone wanders when idle — god included; he just keeps his
+            // "running the floor" bubble instead of the plain "idle" one.
+            c.startWandering();
+            c.showThought(liveActivity(agent, agent.isGod ? 'running the floor' : 'idle'));
             break;
         }
       };
