@@ -49,11 +49,29 @@ export function TasksKanban() {
     archiveAllDone,
     unarchiveTask,
     dispatchTask,
-    dispatchAllTodo
+    dispatchAllTodo,
+    approveTask,
+    rejectTask
   } = useTasks();
 
   const nameFor = (id?: string): string | undefined =>
     id ? (agents.find((a) => a.id === id)?.name ?? id) : undefined;
+
+  // Auto-approve toggle, persisted in HarnessConfig (survives restart, like sttModel).
+  // Seeded once from the main config; toggling writes straight back via updateConfig.
+  const [autoApprove, setAutoApprove] = useState(false);
+  useEffect(() => {
+    let live = true;
+    window.cth.getConfig().then((c) => { if (live) setAutoApprove(c?.autoApprove === true); }).catch(() => { /* noop */ });
+    return () => { live = false; };
+  }, []);
+  const toggleAutoApprove = useCallback(() => {
+    setAutoApprove((prev) => {
+      const next = !prev;
+      window.cth.updateConfig({ autoApprove: next }).catch(() => { /* best-effort */ });
+      return next;
+    });
+  }, []);
 
   // Archived tasks live off the board (their own collapsible section); the four
   // columns and the toolbar count only ever see the active set.
@@ -75,6 +93,44 @@ export function TasksKanban() {
       onEdit={() => openTask(t.id)}
     />
   );
+
+  // Needs Approval cards get an extra APPROVE / REJECT row under the standard card.
+  const renderApprovalCard = (t: ProjectTask) => (
+    <div key={t.id} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {renderCard(t)}
+      <div style={{ display: 'flex', gap: 4 }}>
+        <button
+          onClick={() => void approveTask(t)}
+          title="Approve the plan: return to TODO and dispatch it for implementation"
+          style={approvalBtnStyle('var(--cth-mint)')}
+        >
+          <Icon name="check" /> approve
+        </button>
+        <button
+          onClick={() => rejectTask(t)}
+          title="Reject the plan: send back to TODO without dispatching"
+          style={approvalBtnStyle('var(--cth-coral)')}
+        >
+          <Icon name="x" /> reject
+        </button>
+      </div>
+    </div>
+  );
+
+  // Auto-approve: when the toggle is on, any card that ENTERS Needs Approval is
+  // approved immediately (no human click). The ref guards against double-firing —
+  // a transient 5s-poll read of stale disk could momentarily re-show a just-moved
+  // card as needs-approval, and approveTask dispatches, so we approve each id at
+  // most once per session. moveTask clears planMode, so it can't loop back in.
+  const autoApprovedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!autoApprove) return;
+    const pending = active.filter((t) => t.status === 'needs-approval' && !autoApprovedRef.current.has(t.id));
+    pending.forEach((t) => {
+      autoApprovedRef.current.add(t.id);
+      void approveTask(t);
+    });
+  }, [autoApprove, active, approveTask]);
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--cth-paper-200)' }}>
@@ -123,7 +179,24 @@ export function TasksKanban() {
                   label={NEEDS_APPROVAL.label}
                   accent={NEEDS_APPROVAL.accent}
                   cards={approvalCards}
-                  renderCard={renderCard}
+                  renderCard={renderApprovalCard}
+                  headerExtra={
+                    <label
+                      title="Auto-approve: instantly approve + dispatch any task that enters Needs Approval (persisted)"
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 3, cursor: 'pointer',
+                        fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-900)'
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={autoApprove}
+                        onChange={toggleAutoApprove}
+                        style={{ cursor: 'pointer', margin: 0 }}
+                      />
+                      AUTO
+                    </label>
+                  }
                 />
                 <div style={{ height: 2, flexShrink: 0, background: 'var(--cth-ink-300)' }} />
                 <ColumnSubSection
@@ -214,11 +287,27 @@ export function TasksKanban() {
 //     BLOCKED (bottom); each gets its own accent header, unread badge, count,
 //     and empty-state. Mirrors the normal column header/body styling. ──────────-
 
-function ColumnSubSection({ label, accent, cards, renderCard }: {
+/** Shared pixel-button style for the Needs Approval card's approve/reject row.
+ *  Mirrors the column-header action buttons (archive-all / dispatch-all) but each
+ *  half-fills the row and takes an accent background (mint=approve, coral=reject). */
+function approvalBtnStyle(bg: string): React.CSSProperties {
+  return {
+    flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 3,
+    padding: '2px 6px 1px', border: 'none', cursor: 'pointer',
+    background: bg, boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
+    fontFamily: 'var(--cth-font-display)', fontSize: 8, textTransform: 'uppercase',
+    color: 'var(--cth-ink-900)'
+  };
+}
+
+function ColumnSubSection({ label, accent, cards, renderCard, headerExtra }: {
   label: string;
   accent: string;
   cards: ProjectTask[];
   renderCard: (t: ProjectTask) => React.ReactNode;
+  /** Optional control rendered at the right edge of the sub-section header
+   *  (e.g. the Needs Approval auto-approve checkbox). */
+  headerExtra?: React.ReactNode;
 }) {
   const unread = cards.filter(isTaskUnread).length;
   return (
@@ -241,6 +330,9 @@ function ColumnSubSection({ label, accent, cards, renderCard }: {
           >{unread}</span>
         )}
         <span style={{ marginLeft: unread > 0 ? 4 : 'auto', fontSize: 11, fontFamily: 'var(--cth-font-ui)' }}>{cards.length}</span>
+        {headerExtra && (
+          <span style={{ marginLeft: 6, display: 'inline-flex', alignItems: 'center' }}>{headerExtra}</span>
+        )}
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
         {cards.length === 0 && (

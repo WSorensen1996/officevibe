@@ -46,6 +46,9 @@ export interface HarnessConfig {
   semanticMemory: boolean;
   embeddingModel: 'minilm' | 'embeddinggemma';
   sttModel: 'whisper-base.en' | 'whisper-tiny.en';
+  /** When true, a task entering Needs Approval is auto-approved (returned to TODO +
+   *  dispatched, planMode cleared) without a human Approve click. Persisted. */
+  autoApprove?: boolean;
 }
 
 /** Claude Code's reasoning/effort levels, passed through as the `--effort` flag.

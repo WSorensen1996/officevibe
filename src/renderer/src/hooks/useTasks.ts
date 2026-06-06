@@ -49,6 +49,13 @@ interface TasksStore {
   dispatchTask: (t: ProjectTask) => Promise<void>;
   /** Dispatch every not-yet-dispatched `todo` task in one batch (one persist + one toast). */
   dispatchAllTodo: () => Promise<void>;
+  /** Approve a parked plan: sign off → return the card to TODO (moveTask clears
+   *  planMode + drops the PLAN chip) and dispatch it to its assignee so
+   *  implementation starts. */
+  approveTask: (t: ProjectTask) => Promise<void>;
+  /** Reject a parked plan: send the card back to TODO without dispatching
+   *  (moveTask clears planMode); the human edits / re-plans / re-dispatches. */
+  rejectTask: (t: ProjectTask) => void;
 }
 
 let dispatchMsgTimer: ReturnType<typeof setTimeout> | null = null;
@@ -58,8 +65,9 @@ let dispatchMsgTimer: ReturnType<typeof setTimeout> | null = null;
  *  plan is ready. Appended to the dispatch body only for tasks flagged planMode. */
 const PLAN_MODE_BLOCK =
   '\nPLAN MODE — produce a concise implementation PLAN for this task and DO NOT implement it. '
-  + "When the plan is ready, post a task-update with kind 'needs-approval' whose text is the plan "
-  + 'summary, to park this task in Needs Approval for human sign-off.\n';
+  + "When the plan is ready, post a task-update with kind 'needs-approval' (NOT 'done') whose text "
+  + 'is the plan summary, to park this task in Needs Approval for human sign-off. Do not mark this '
+  + 'task done — wait for the human to approve the plan first.\n';
 
 /** The inbox body for dispatching a task: the standard `Task: … [task:id]\nContext: …`
  *  shell, plus the plan-mode block when the task is flagged planMode. Shared by
@@ -124,16 +132,26 @@ const useTasksStore = create<TasksStore>((set, get) => ({
   },
 
   addTask: (t, schedule) => {
-    get().persist([...get().tasks, t]);
-    get().syncTaskMission(t, schedule);
+    // Baseline the assignee-recency clock at creation so a later agent 'doing' claim
+    // (which stamps assigneeUpdatedAt) doesn't silently outrank the original human
+    // assignment in the writeTasks merge.
+    const seeded = { ...t, assigneeUpdatedAt: t.assignee ? new Date().toISOString() : undefined };
+    get().persist([...get().tasks, seeded]);
+    get().syncTaskMission(seeded, schedule);
   },
 
   // Replace a task in place. Preserve harness-owned `updates` (the form never
-  // carries them) and only re-stamp `statusUpdatedAt` when the human actually
-  // changed the column, so the main-process merge keeps the latest writer.
+  // carries them) and only re-stamp `statusUpdatedAt`/`assigneeUpdatedAt` when the
+  // human actually changed the column / the assignee, so the main-process merge
+  // keeps the latest writer of each (the two clocks are independent).
   saveEdit: (t, schedule) => {
     get().persist(get().tasks.map((x) => (x.id === t.id
-      ? { ...t, updates: x.updates, statusUpdatedAt: x.status === t.status ? x.statusUpdatedAt : new Date().toISOString() }
+      ? {
+          ...t,
+          updates: x.updates,
+          statusUpdatedAt: x.status === t.status ? x.statusUpdatedAt : new Date().toISOString(),
+          assigneeUpdatedAt: x.assignee === t.assignee ? x.assigneeUpdatedAt : new Date().toISOString()
+        }
       : x)));
     get().syncTaskMission(t, schedule);
   },
@@ -145,8 +163,19 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     persist(tasks.filter((x) => x.id !== id)); // dropping the task drops its updates — intended
   },
 
+  // Move a card to a new column. Moving a task OUT of needs-approval is the human's
+  // "plan approved" gesture, so clear planMode there: the planning phase is over, the
+  // PLAN chip/dispatch addendum drop, and the eventual real 'done' is no longer
+  // coerced back to needs-approval (see main appendTaskUpdate's plan-mode auto-park).
   moveTask: (id, status) => {
-    get().persist(get().tasks.map((t) => (t.id === id ? { ...t, status, statusUpdatedAt: new Date().toISOString() } : t)));
+    get().persist(get().tasks.map((t) => (t.id === id
+      ? {
+          ...t,
+          status,
+          statusUpdatedAt: new Date().toISOString(),
+          planMode: t.status === 'needs-approval' && status !== 'needs-approval' ? undefined : t.planMode
+        }
+      : t)));
   },
 
   // Set priority in place from the board card. Clamp to 1-5 (the range the form
@@ -264,6 +293,24 @@ const useTasksStore = create<TasksStore>((set, get) => ({
       `dispatched ${sent.size} task${sent.size === 1 ? '' : 's'}` +
       (failed ? ` · ${failed} failed` : '') +
       (sent.size > 0 && delivered === 0 ? ' · ⚠ no active agent received them' : ''));
+  },
+
+  // Approve a parked plan: the plan is signed off, so return the card to TODO and
+  // dispatch it for implementation. moveTask('todo') is the human-approval gesture
+  // that clears planMode (and drops the PLAN chip), so the dispatched body carries
+  // the plain implement instruction (no plan-mode addendum) and the eventual 'done'
+  // is no longer coerced back to needs-approval. dispatchTask maps over the live
+  // store array (already reflecting the move), so the two persists don't clobber.
+  approveTask: async (t) => {
+    get().moveTask(t.id, 'todo');
+    await get().dispatchTask({ ...t, status: 'todo', planMode: undefined });
+  },
+
+  // Reject a parked plan: send it back to TODO WITHOUT dispatching (moveTask clears
+  // planMode). The human then edits, re-enables plan mode, or re-dispatches as they
+  // see fit. Same single-field move as the lane <select>; just a one-click shortcut.
+  rejectTask: (t) => {
+    get().moveTask(t.id, 'todo');
   }
 }));
 
@@ -328,6 +375,8 @@ export function useTasks() {
     unarchiveTask: s.unarchiveTask,
     markTaskRead: s.markTaskRead,
     dispatchTask: s.dispatchTask,
-    dispatchAllTodo: s.dispatchAllTodo
+    dispatchAllTodo: s.dispatchAllTodo,
+    approveTask: s.approveTask,
+    rejectTask: s.rejectTask
   };
 }

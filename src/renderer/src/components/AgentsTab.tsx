@@ -33,7 +33,7 @@ export function AgentsTab() {
 
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 12, background: 'var(--cth-paper-200)' }}>
-      {/* Cards fill the tab width: a wrapping flex row packs as many ~220px cards
+      {/* Cards fill the tab width: a wrapping flex row packs as many ~280px cards
           per line as fit, then wraps. The container's overflowY (above) scrolls
           the rows — no horizontal scroll. */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' }}>

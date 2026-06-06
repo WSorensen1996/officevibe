@@ -59,7 +59,7 @@ export function AgentCard({
       }}
       className="cth-titlebar-nodrag"
       style={{
-        width: 220, minWidth: 220, flexShrink: 0,
+        width: 280, minWidth: 280, flexShrink: 0,
         padding: 0, cursor: 'pointer', textAlign: 'left'
       }}
     >

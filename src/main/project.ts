@@ -81,6 +81,12 @@ export interface ProjectTask {
   /** ISO of the last status change — recency tiebreaker so a stale wholesale
    *  renderer overwrite can't revert a fresher agent auto-move (and vice-versa). */
   statusUpdatedAt?: string;
+  /** ISO of the last ASSIGNEE change — its OWN recency tiebreaker, decoupled from
+   *  statusUpdatedAt. Stamped by appendTaskUpdate when an agent's 'doing' claims the
+   *  task AND by the renderer when a human reassigns. Without this, assignee rode the
+   *  status recency, so god's routing 'doing' (fresh statusUpdatedAt) reverted a
+   *  human reassign that didn't bump statusUpdatedAt. */
+  assigneeUpdatedAt?: string;
   /** ISO of the last UI dispatch — hides the dispatch button until the task's
    *  status next changes (re-nudgeable when blocked). */
   dispatchedAt?: string;
@@ -856,12 +862,18 @@ export class ProjectManager {
       const disk = byId.get(t.id);
       if (!disk) return t;                                   // brand-new task — take as-is
       const diskNewer = (disk.statusUpdatedAt ?? '') > (t.statusUpdatedAt ?? '');
+      // Assignee has its OWN recency clock, independent of status. Both an agent's
+      // 'doing' claim and a human reassign stamp assigneeUpdatedAt, so whichever
+      // touched the assignee most recently wins — a human reassign (which doesn't
+      // bump statusUpdatedAt) is no longer dragged back by an older status write.
+      const assigneeDiskNewer = (disk.assigneeUpdatedAt ?? '') > (t.assigneeUpdatedAt ?? '');
       return {
         ...t,
         updates: disk.updates ?? t.updates,                  // agent history always from disk
         status: diskNewer ? disk.status : t.status,          // most-recent status writer wins
         statusUpdatedAt: diskNewer ? disk.statusUpdatedAt : t.statusUpdatedAt,
-        assignee: diskNewer ? disk.assignee : t.assignee     // an agent's fresh 'doing' claim (set with status) wins over a stale renderer copy; a human reassign (status unchanged) still wins via `...t`
+        assignee: assigneeDiskNewer ? disk.assignee : t.assignee,            // most-recent assignee writer wins (decoupled from status)
+        assigneeUpdatedAt: assigneeDiskNewer ? disk.assigneeUpdatedAt : t.assigneeUpdatedAt
       };
     });
     this.writeJson(join(root, 'tasks.json'), { tasks: merged });
@@ -883,18 +895,33 @@ export class ProjectManager {
     const kind: TaskUpdate['kind'] =
       (['doing', 'blocked', 'needs-approval', 'done', 'note'] as const).includes(raw.kind as TaskUpdate['kind'])
         ? (raw.kind as TaskUpdate['kind']) : 'note';
-    const u: TaskUpdate = { ts: new Date().toISOString(), by, kind, text: String(raw.text ?? '').slice(0, 280) };
+    // Plan-mode auto-park: a plan-mode task means "produce a PLAN, don't finish —
+    // park for human sign-off." Agents routinely forget the special 'needs-approval'
+    // kind and just post 'done' when their plan is ready, so the card never parks
+    // (the bug). Coerce 'done' -> 'needs-approval' for any task still flagged planMode.
+    // planMode is cleared the moment a human approves (moves it out of Needs Approval,
+    // see useTasks.moveTask), so the real, post-approval 'done' still sticks and the
+    // card can't ping-pong back here.
+    const effectiveKind: TaskUpdate['kind'] =
+      task.planMode === true && kind === 'done' ? 'needs-approval' : kind;
+    const u: TaskUpdate = { ts: new Date().toISOString(), by, kind: effectiveKind, text: String(raw.text ?? '').slice(0, 280) };
     task.updates = [...(task.updates ?? []), u].slice(-20);
-    if (kind !== 'note') { task.status = kind; task.statusUpdatedAt = u.ts; } // auto-move the card
-    // A 'doing' update is the authoritative "I'm working this now" signal, so
-    // claim the task for its author (`by` = owning agent dir). Only on 'doing':
-    // leave assignee untouched on blocked/done/note (don't reassign on finish).
-    // Stamped together with statusUpdatedAt so writeTasks' recency guard keeps
-    // this claim from being reverted by a stale renderer write (see below).
-    if (kind === 'doing') { task.assignee = by; }
+    if (effectiveKind !== 'note') { task.status = effectiveKind; task.statusUpdatedAt = u.ts; } // auto-move the card
+    // A 'doing' update is the authoritative "I'm working this now" signal, so a
+    // WORKER's 'doing' claims the task for its author (`by` = owning agent dir).
+    // Only on 'doing': leave assignee untouched on blocked/done/note (don't reassign
+    // on finish). EXCLUDE god (the orchestrator): god posts 'doing' to route/triage,
+    // not to do the work, so an implicit claim by god would hijack the worker's
+    // assignment — the exact reassign-reverts-to-Michael bug. A human can still
+    // assign god explicitly via the form (that path stamps assigneeUpdatedAt itself).
+    // Stamp assigneeUpdatedAt with the claim so it gets its own recency clock in the
+    // writeTasks merge (decoupled from statusUpdatedAt) — a stale renderer copy can't
+    // revert it, and a fresher human reassign still wins.
+    const godId = this.registry().godId ?? 'god';
+    if (effectiveKind === 'doing' && by !== godId) { task.assignee = by; task.assigneeUpdatedAt = u.ts; }
     this.writeJson(join(root, 'tasks.json'), data);
-    this.appendLog({ kind: 'task-update', taskId, by, state: kind });
-    this.emit?.('project:taskUpdated', { taskId, by, kind, text: u.text });
+    this.appendLog({ kind: 'task-update', taskId, by, state: effectiveKind });
+    this.emit?.('project:taskUpdated', { taskId, by, kind: effectiveKind, text: u.text });
   }
 
   /** Stage a skill an agent drafted into the knowledge library's `proposals/` dir for

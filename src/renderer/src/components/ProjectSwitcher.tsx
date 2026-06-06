@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useRef, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Icon } from './Icon';
 import { NewProjectModal } from './NewProjectModal';
 import type { HarnessConfig, ProjectRef } from '@/store/config';
@@ -25,6 +26,31 @@ export function ProjectSwitcher({ config }: ProjectSwitcherProps) {
   const [showNew, setShowNew] = useState(false);
   const projects: ProjectRef[] = config.projects ?? [];
 
+  // The menu is portaled to <body> and positioned `fixed` from the trigger's
+  // viewport rect, so it escapes the overflow:auto scroll containers it lives in
+  // (App top bar, Settings tab) which would otherwise clip it. `btnRef` anchors
+  // it; `pos` is recomputed when opening and on scroll/resize so it tracks.
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const r = btnRef.current?.getBoundingClientRect();
+      if (!r) return;
+      // Clamp so a 240px-min menu never runs off the right viewport edge.
+      const left = Math.min(r.left, window.innerWidth - 248);
+      setPos({ top: r.bottom + 4, left: Math.max(8, left) });
+    };
+    place();
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    };
+  }, [open]);
+
   const switchTo = (p: ProjectRef) => {
     setOpen(false);
     if (p.path === config.activeProjectPath) return;
@@ -40,6 +66,7 @@ export function ProjectSwitcher({ config }: ProjectSwitcherProps) {
   return (
     <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
       <button
+        ref={btnRef}
         onClick={() => setOpen((v) => !v)}
         title="Switch project"
         style={{
@@ -59,7 +86,7 @@ export function ProjectSwitcher({ config }: ProjectSwitcherProps) {
         <span style={{ fontSize: 8, opacity: 0.6 }}>▾</span>
       </button>
 
-      {open && (
+      {open && pos && createPortal(
         <>
           {/* click-away backdrop */}
           <div
@@ -67,7 +94,7 @@ export function ProjectSwitcher({ config }: ProjectSwitcherProps) {
             style={{ position: 'fixed', inset: 0, zIndex: 90 }}
           />
           <div style={{
-            position: 'absolute', top: '100%', left: 0, marginTop: 4,
+            position: 'fixed', top: pos.top, left: pos.left,
             minWidth: 240, zIndex: 91,
             background: 'var(--cth-paper-100)',
             boxShadow: 'inset 0 0 0 2px var(--cth-ink-900), 4px 4px 0 rgba(26,19,32,0.25)',
@@ -107,7 +134,8 @@ export function ProjectSwitcher({ config }: ProjectSwitcherProps) {
               <Icon name="plus" /> New project…
             </button>
           </div>
-        </>
+        </>,
+        document.body
       )}
 
       {showNew && <NewProjectModal config={config} onClose={() => setShowNew(false)} />}

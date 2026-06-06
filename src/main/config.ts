@@ -93,6 +93,10 @@ export interface HarnessConfig {
   /** Whisper dictation model: accurate 'whisper-base.en' (default) or lighter/faster
    *  'whisper-tiny.en'. The string is the on-disk model folder name the STT worker loads. */
   sttModel: 'whisper-base.en' | 'whisper-tiny.en';
+  /** When true, any task that ENTERS the Needs Approval sub-section is immediately
+   *  auto-approved (returned to TODO + dispatched, planMode cleared) without waiting
+   *  for a human Approve click. Persisted so it survives restart. Default false. */
+  autoApprove?: boolean;
   /** Recurring auto-dispatch missions handled by the scheduler. */
   missions?: ScheduledMission[];
   /** Fire native desktop notifications on agent lifecycle events (idle finish / waiting for input). */
@@ -131,6 +135,7 @@ const DEFAULTS: HarnessConfig = {
   curatorBackupKeep: 5,
   curatorUsageCeilingPercent: 80,
   sttModel: 'whisper-base.en',
+  autoApprove: false,
   missions: [],
   notifications: false,
   slackEnabled: false,

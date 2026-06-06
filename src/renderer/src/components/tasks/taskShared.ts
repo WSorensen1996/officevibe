@@ -40,6 +40,10 @@ export interface ProjectTask {
   /** ISO of the last status change — stamped on a manual move/edit so the
    *  main-process merge keeps whichever of human/agent changed status last. */
   statusUpdatedAt?: string;
+  /** ISO of the last assignee change — its own recency clock (decoupled from
+   *  statusUpdatedAt). Stamped by the renderer on a reassign and by the harness on
+   *  an agent's 'doing' claim, so the merge keeps the latest assignee writer. */
+  assigneeUpdatedAt?: string;
   /** ISO of the last UI dispatch — hides the dispatch button until the task's
    *  status next changes (re-nudgeable when blocked). */
   dispatchedAt?: string;
@@ -238,6 +242,8 @@ export function parseTasks(raw: unknown): ProjectTask[] {
       createdAt: typeof t.createdAt === 'string' ? t.createdAt : new Date().toISOString(),
       updates: parseUpdates(t.updates),
       statusUpdatedAt: typeof t.statusUpdatedAt === 'string' ? t.statusUpdatedAt : undefined,
+      // Load-bearing: drop this on poll and the assignee-recency merge loses its clock.
+      assigneeUpdatedAt: typeof t.assigneeUpdatedAt === 'string' ? t.assigneeUpdatedAt : undefined,
       dispatchedAt: typeof t.dispatchedAt === 'string' ? t.dispatchedAt : undefined,
       // Load-bearing: drop this on poll and the next human persist() un-archives.
       archived: t.archived === true ? true : undefined,

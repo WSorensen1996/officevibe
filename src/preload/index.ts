@@ -66,6 +66,9 @@ export interface ProjectTask {
   updates?: TaskUpdate[];
   /** ISO of the last status change — recency tiebreaker for the writeTasks merge. */
   statusUpdatedAt?: string;
+  /** ISO of the last assignee change — its own recency tiebreaker (decoupled from
+   *  statusUpdatedAt) so a human reassign isn't reverted by an older status write. */
+  assigneeUpdatedAt?: string;
   /** ISO of the last UI dispatch — hides the dispatch button until the task's
    *  status next changes (re-nudgeable when blocked). */
   dispatchedAt?: string;
@@ -198,6 +201,8 @@ export interface HarnessConfig {
   semanticMemory: boolean;
   embeddingModel: 'minilm' | 'embeddinggemma';
   sttModel: 'whisper-base.en' | 'whisper-tiny.en';
+  /** Auto-approve tasks entering Needs Approval (see main config.ts). */
+  autoApprove?: boolean;
   missions?: ScheduledMission[];
   notifications?: boolean;
   mcpServers?: McpServerDef[];
