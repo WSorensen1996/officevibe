@@ -92,7 +92,12 @@ function getTranscriber() {
       'automatic-speech-recognition',
       modelId,
       {
-        ...(webgpu ? { device: 'webgpu' } : {}),
+        // Pin the device EXPLICITLY — never omit it. With navigator.gpu present (the
+        // Phase-2 WebGPU flags), transformers.js/ORT-web pick WebGPU when no device is
+        // given, so omitting it silently ran the "CPU" tiers on WebGPU too (and crashed
+        // the shared GPU process). Forcing 'wasm' keeps CPU tiers off the GPU and makes
+        // the runtime fallback's `device` checks match what actually executes.
+        device: webgpu ? 'webgpu' : 'wasm',
         dtype,
         // onnxruntime-web's extended/'all' graph optimizer crashes on the q8 decoder's
         // tied embedding ("TransposeDQWeightsForMatMulNBits Missing required scale").
