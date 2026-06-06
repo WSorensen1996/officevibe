@@ -1,9 +1,11 @@
-// Vendors the local, CPU-only speech-to-text assets so the "tap to speak" feature
-// runs FULLY OFFLINE (no Hugging Face / CDN access at runtime):
-//   1. The Whisper `base.en` ONNX model (int8 / q8 = the `_quantized` files) into
-//      src/renderer/public/models/whisper-base.en/
+// Vendors the local speech-to-text assets so the "tap to speak" feature runs FULLY
+// OFFLINE (no Hugging Face / CDN access at runtime):
+//   1. The Whisper ONNX models into src/renderer/public/models/<id>/ — the two q8/CPU
+//      models (base.en/tiny.en, the `_quantized` files) plus the GPU tier
+//      distil-small.en (fp32 encoder + q4 decoder, run on WebGPU with WASM fallback).
 //   2. The onnxruntime-web WASM binaries (version-matched to the copy bundled by
-//      @huggingface/transformers) into src/renderer/public/wasm/
+//      @huggingface/transformers) into src/renderer/public/wasm/ — the whole ort-wasm-*
+//      set, which includes the JSEP build the WebGPU execution provider loads.
 //
 // Vite copies everything under src/renderer/public/ to the renderer build output
 // verbatim, and the renderer loads these via env.localModelPath / wasmPaths (see
@@ -20,11 +22,24 @@ import { dirname, join, resolve } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 
-// Both dictation models the app can switch between (Settings → DICTATION). Each is
+// The dictation models the app can switch between (Settings → DICTATION). Each is
 // vendored into src/renderer/public/models/<id>/ and loaded fully offline at runtime.
+// The first two are q8/CPU (WASM); distil-small.en is the GPU tier — fp32 encoder +
+// q4 merged decoder, run on the WebGPU backend (it falls back to WASM if no adapter).
+// A model's `onnx` list overrides the default q8 file set below; the id MUST match the
+// sttModel union, the STT_MODELS card, and what transcriber.worker.ts loads.
 const MODELS = [
   { id: 'whisper-base.en', repo: 'onnx-community/whisper-base.en' },
   { id: 'whisper-tiny.en', repo: 'onnx-community/whisper-tiny.en' },
+  {
+    id: 'distil-small.en',
+    repo: 'onnx-community/distil-small.en',
+    // GPU tier: fp32 encoder (no dtype suffix — Whisper's encoder is quantization-
+    // sensitive) + q4 merged decoder (speed/VRAM). ~538 MB total. Matches the
+    // per-module dtype { encoder_model:'fp32', decoder_model_merged:'q4' } the worker
+    // passes on the WebGPU backend.
+    onnx: ['onnx/encoder_model.onnx', 'onnx/decoder_model_merged_q4.onnx'],
+  },
 ];
 
 const MODELS_ROOT = join(ROOT, 'src/renderer/public/models');
@@ -50,10 +65,11 @@ const OPTIONAL_CONFIG = [
   'merges.txt',
 ];
 
-// q8 (== transformers.js DATA_TYPES.q8 → "_quantized" file suffix). The merged
-// decoder handles both the first step and the with-past steps, so these two files
-// are all Whisper ASR needs.
-const REQUIRED_ONNX = [
+// Default q8 ONNX (== transformers.js DATA_TYPES.q8 → "_quantized" file suffix). The
+// merged decoder handles both the first step and the with-past steps, so these two
+// files are all Whisper ASR needs. A model may override this via its own `onnx` list
+// (e.g. the GPU tier's fp32 encoder + q4 decoder).
+const DEFAULT_ONNX = [
   'onnx/encoder_model_quantized.onnx',
   'onnx/decoder_model_merged_quantized.onnx',
 ];
@@ -107,14 +123,14 @@ async function copyWasm() {
   console.log(`  copied ${names.length} ORT files (${(bytes / 1e6).toFixed(1)} MB new)`);
 }
 
-async function prepareModel({ id, repo }) {
+async function prepareModel({ id, repo, onnx }) {
   const modelDir = join(MODELS_ROOT, id);
   const hfBase = `https://huggingface.co/${repo}/resolve/main`;
   console.log(`\nModel "${id}" → ${modelDir}`);
   await mkdir(modelDir, { recursive: true });
   for (const f of REQUIRED_CONFIG) await download(modelDir, hfBase, f, { required: true });
   for (const f of OPTIONAL_CONFIG) await download(modelDir, hfBase, f, { required: false });
-  for (const f of REQUIRED_ONNX) await download(modelDir, hfBase, f, { required: true });
+  for (const f of (onnx ?? DEFAULT_ONNX)) await download(modelDir, hfBase, f, { required: true });
 }
 
 async function main() {
