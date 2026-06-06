@@ -90,9 +90,10 @@ export interface HarnessConfig {
   curatorBackupKeep?: number;
   /** Skip the curator's LLM consolidation when 5h or 7d Claude usage exceeds this percent. */
   curatorUsageCeilingPercent?: number;
-  /** Whisper dictation model: accurate 'whisper-base.en' (default) or lighter/faster
-   *  'whisper-tiny.en'. The string is the on-disk model folder name the STT worker loads. */
-  sttModel: 'whisper-base.en' | 'whisper-tiny.en';
+  /** Whisper dictation model: accurate 'whisper-base.en' (default), lighter/faster
+   *  'whisper-tiny.en', or the GPU tier 'distil-small.en' (WebGPU, CPU fallback). The
+   *  string is the on-disk model folder name the STT worker loads. */
+  sttModel: 'whisper-base.en' | 'whisper-tiny.en' | 'distil-small.en';
   /** When true, any task that ENTERS the Needs Approval sub-section is immediately
    *  auto-approved (returned to TODO + dispatched, planMode cleared) without waiting
    *  for a human Approve click. Persisted so it survives restart. Default false. */

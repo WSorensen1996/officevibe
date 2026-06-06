@@ -200,7 +200,7 @@ export interface HarnessConfig {
   defaultEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   semanticMemory: boolean;
   embeddingModel: 'minilm' | 'embeddinggemma';
-  sttModel: 'whisper-base.en' | 'whisper-tiny.en';
+  sttModel: 'whisper-base.en' | 'whisper-tiny.en' | 'distil-small.en';
   /** Auto-approve tasks entering Needs Approval (see main config.ts). */
   autoApprove?: boolean;
   missions?: ScheduledMission[];

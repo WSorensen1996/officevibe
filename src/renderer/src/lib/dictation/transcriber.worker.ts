@@ -19,11 +19,15 @@ const ctx = self as unknown as Worker;
 // base model if an older host posts an init without a model field.
 let modelId = 'whisper-base.en';
 
-// The compute backend this worker actually loads the model on. Today (Phase-1)
-// always 'wasm' (CPU); Phase-2 sets it from the init message + drives device:'webgpu'
-// in pipeline(). Echoed back in the 'ready' message so Settings can show the human
-// which backend transcription is really running on (task 5z52).
+// The compute backend this worker actually loads the model on. Set from the init
+// message's `device` (the hook picks 'webgpu' only for the GPU model + present adapter)
+// and drives device:'webgpu' + per-module dtype in pipeline(). On any WebGPU init
+// failure we drop to 'wasm' (see the init handler) so dictation never breaks. Echoed
+// back in the 'ready' message so Settings shows the human the real backend (task 5z52).
 let device: 'webgpu' | 'wasm' = 'wasm';
+
+// The known-good CPU model we fall back to if WebGPU init throws (driver/adapter flake).
+const CPU_FALLBACK_MODEL = 'whisper-base.en';
 
 /** Log to the worker's own console (visible in DevTools) AND post to the hook,
  *  which relays it to the main process so it also lands in the dev terminal. */
@@ -70,12 +74,17 @@ function configure(base: string): void {
 
 function getTranscriber() {
   if (!transcriberPromise) {
-    log('log', `loading model ${modelId} (dtype q8)…`);
+    const webgpu = device === 'webgpu';
+    // WebGPU: per-module dtype — fp32 encoder (Whisper's encoder is quantization-
+    // sensitive) + q4 merged decoder (speed/VRAM). WASM/CPU: q8 on both modules.
+    const dtype: unknown = webgpu ? { encoder_model: 'fp32', decoder_model_merged: 'q4' } : 'q8';
+    log('log', `loading model ${modelId} on ${device}…`, dtype);
     transcriberPromise = (pipeline as unknown as (
       task: string,
       model: string,
       opts: {
-        dtype: string;
+        device?: string;
+        dtype: unknown;
         session_options?: { graphOptimizationLevel?: string };
         progress_callback?: (p: unknown) => void;
       }
@@ -83,11 +92,13 @@ function getTranscriber() {
       'automatic-speech-recognition',
       modelId,
       {
-        dtype: 'q8',
-        // onnxruntime-web's extended/'all' graph optimizer crashes on this q8
-        // decoder's tied embedding ("TransposeDQWeightsForMatMulNBits Missing
-        // required scale"). 'basic' skips that buggy fusion and the model loads
-        // fine — verified against the vendored decoder with ort-web 1.26-dev.
+        ...(webgpu ? { device: 'webgpu' } : {}),
+        dtype,
+        // onnxruntime-web's extended/'all' graph optimizer crashes on the q8 decoder's
+        // tied embedding ("TransposeDQWeightsForMatMulNBits Missing required scale").
+        // 'basic' skips that buggy fusion and the model loads fine — verified against
+        // the vendored decoder with ort-web 1.26-dev. Harmless on the WebGPU EP; kept
+        // on both paths as a guard.
         session_options: { graphOptimizationLevel: 'basic' },
         // progress_callback fires for every asset fetch (config/tokenizer/onnx/wasm) —
         // the key signal for a stuck or 404'd model/wasm load.
@@ -100,14 +111,27 @@ function getTranscriber() {
 
 ctx.onmessage = async (e: MessageEvent) => {
   const msg = e.data as
-    | { type: 'init'; base: string; model?: string }
+    | { type: 'init'; base: string; model?: string; device?: 'webgpu' | 'wasm' }
     | { type: 'transcribe'; id: number; pcm: Float32Array };
   try {
     if (msg.type === 'init') {
       if (msg.model) modelId = msg.model;
-      log('log', 'init received, base=', msg.base, 'model=', modelId);
+      device = msg.device === 'webgpu' ? 'webgpu' : 'wasm';
+      log('log', 'init received, base=', msg.base, 'model=', modelId, 'device=', device);
       configure(msg.base);
-      await getTranscriber(); // warm the model so the first dictation isn't cold
+      try {
+        await getTranscriber(); // warm the model so the first dictation isn't cold
+      } catch (initErr) {
+        // WebGPU is flaky (driver/adapter); never let it break dictation — drop to the
+        // known-good q8 CPU model on WASM and re-init. CPU models rethrow (real error).
+        if (device !== 'webgpu') throw initErr;
+        log('error', `webgpu init failed; falling back to ${CPU_FALLBACK_MODEL} on CPU:`,
+          initErr instanceof Error ? (initErr.stack ?? initErr.message) : String(initErr));
+        device = 'wasm';
+        modelId = CPU_FALLBACK_MODEL;
+        transcriberPromise = null;
+        await getTranscriber();
+      }
       log('log', `model ready on ${device}`);
       ctx.postMessage({ type: 'ready', device });
     } else if (msg.type === 'transcribe') {

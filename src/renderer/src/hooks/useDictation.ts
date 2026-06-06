@@ -16,9 +16,16 @@ export type DictationState = 'idle' | 'recording' | 'transcribing' | 'error';
 let worker: Worker | null = null;
 let workerReady: Promise<void> | null = null;
 let nextId = 0;
-// The model id the current `worker` was built for; lets us rebuild on a config change.
+// The model id + backend the current `worker` was built for; lets us rebuild on a
+// config change (model switch) or a device change.
 let loadedModel: string | null = null;
+let loadedDevice: 'webgpu' | 'wasm' | null = null;
 const pending = new Map<number, { resolve: (t: string) => void; reject: (e: Error) => void }>();
+
+// Models that should run on the WebGPU backend when an adapter is present. The CPU
+// models (whisper-base/tiny) always run on WASM. Keep in sync with the GPU tier ids in
+// scripts/prepare-stt-assets.mjs + the STT_MODELS picker.
+const GPU_MODELS = new Set(['distil-small.en']);
 
 /** Same-origin base the vendored assets are served from: http://localhost/ in dev,
  *  app://bundle/ in a packaged build. transformers.js + ORT fetch model/wasm from here. */
@@ -35,11 +42,17 @@ async function ensureWorker(): Promise<void> {
     if (cfg?.sttModel) desiredModel = cfg.sttModel;
   } catch { /* fall back to default */ }
 
-  // A worker already exists but for a different model → tear it down so it rebuilds
-  // with the new model. Safe because we only reach here between dictations (start()
-  // warm-up or stop() right before transcribe); any in-flight pending are rejected.
-  if (workerReady && loadedModel !== desiredModel) {
-    sttLog('log', `stt model changed (${loadedModel} → ${desiredModel}); rebuilding worker`);
+  // Run the GPU tier on WebGPU only when an adapter is reachable; otherwise (CPU model,
+  // or no navigator.gpu) stay on WASM. If navigator.gpu is present but the adapter is
+  // actually unusable, the worker's init try/catch falls back to CPU on its own.
+  const gpuPresent = typeof navigator !== 'undefined' && !!navigator.gpu;
+  const desiredDevice: 'webgpu' | 'wasm' = GPU_MODELS.has(desiredModel) && gpuPresent ? 'webgpu' : 'wasm';
+
+  // A worker already exists but for a different model OR backend → tear it down so it
+  // rebuilds. Safe because we only reach here between dictations (start() warm-up or
+  // stop() right before transcribe); any in-flight pending are rejected.
+  if (workerReady && (loadedModel !== desiredModel || loadedDevice !== desiredDevice)) {
+    sttLog('log', `stt config changed (${loadedModel}/${loadedDevice} → ${desiredModel}/${desiredDevice}); rebuilding worker`);
     try { worker?.terminate(); } catch { /* noop */ }
     worker = null;
     workerReady = null;
@@ -51,7 +64,8 @@ async function ensureWorker(): Promise<void> {
 
   const base = assetBase();
   loadedModel = desiredModel;
-  sttLog('log', 'ensureWorker: creating worker, base=', base, 'model=', desiredModel);
+  loadedDevice = desiredDevice;
+  sttLog('log', 'ensureWorker: creating worker, base=', base, 'model=', desiredModel, 'device=', desiredDevice);
   workerReady = new Promise<void>((resolve, reject) => {
     const w = new Worker(
       new URL('../lib/dictation/transcriber.worker.ts', import.meta.url),
@@ -78,10 +92,10 @@ async function ensureWorker(): Promise<void> {
       sttLog('error', 'worker.onerror:', e.message || '(no message)', 'at', e.filename, e.lineno);
       reject(new Error(e.message || 'speech worker failed to load (see console)'));
     };
-    w.postMessage({ type: 'init', base, model: desiredModel });
+    w.postMessage({ type: 'init', base, model: desiredModel, device: desiredDevice });
   });
   // A failed load shouldn't permanently wedge dictation — allow a later retry.
-  workerReady.catch(() => { workerReady = null; worker = null; loadedModel = null; });
+  workerReady.catch(() => { workerReady = null; worker = null; loadedModel = null; loadedDevice = null; });
   return workerReady;
 }
 

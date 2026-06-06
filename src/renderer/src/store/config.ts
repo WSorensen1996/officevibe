@@ -45,7 +45,7 @@ export interface HarnessConfig {
   defaultEffort?: EffortLevel;
   semanticMemory: boolean;
   embeddingModel: 'minilm' | 'embeddinggemma';
-  sttModel: 'whisper-base.en' | 'whisper-tiny.en';
+  sttModel: 'whisper-base.en' | 'whisper-tiny.en' | 'distil-small.en';
   /** When true, a task entering Needs Approval is auto-approved (returned to TODO +
    *  dispatched, planMode cleared) without a human Approve click. Persisted. */
   autoApprove?: boolean;

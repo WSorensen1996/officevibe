@@ -16,7 +16,8 @@ import { ProjectSwitcher } from './ProjectSwitcher';
 type SttModelId = HarnessConfig['sttModel'];
 const STT_MODELS: { id: SttModelId; title: string; detail: string }[] = [
   { id: 'whisper-base.en', title: 'Standard', detail: 'More accurate · ~78 MB' },
-  { id: 'whisper-tiny.en', title: 'Fast', detail: 'Quicker · ~44 MB, lower accuracy' }
+  { id: 'whisper-tiny.en', title: 'Fast', detail: 'Quicker · ~44 MB, lower accuracy' },
+  { id: 'distil-small.en', title: 'High accuracy (GPU)', detail: 'Best accuracy · runs on GPU · ~538 MB (CPU fallback)' }
 ];
 
 /** Human-readable label for the backend the dictation worker actually loaded on —
