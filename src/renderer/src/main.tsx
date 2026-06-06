@@ -5,21 +5,46 @@ import { sttLog } from '@/lib/dictation/log';
 import brandLogo from '@brand/logo.png?url';
 import './design/global.css';
 
-// [STT-WEBGPU-PROBE] Phase-1 go/no-go for GPU speech-to-text (task 5z52). Logs once
-// on app start whether THIS machine exposes a usable WebGPU adapter (Linux+Electron
-// WebGPU is flaky — this single check decides if Option A is viable). Goes through
-// sttLog so the line shows in the `npm run dev` terminal AND DevTools — grep
-// [STT-WEBGPU-PROBE]. Tiny + self-contained; REMOVE after the go/no-go decision.
+// [STT-WEBGPU-PROBE] Phase-1 go/no-go for GPU speech-to-text (task 5z52). On app
+// start, probes whether THIS machine exposes a usable WebGPU adapter (Linux+Electron
+// WebGPU is flaky). The result is (a) logged via sttLog → `npm run dev` terminal +
+// DevTools (grep [STT-WEBGPU-PROBE]) AND (b) PERSISTED to <activeProject>/webgpu-probe.json
+// via the sandboxed fs:writeFile IPC — a file is how the in-app reader (god) confirms
+// the adapter post-deploy, since the konsole terminal isn't readable there. Tiny +
+// self-contained; REMOVE the whole block after the GPU work ships.
 void (async () => {
+  const nowIso = (): string => { try { return new Date().toISOString(); } catch { return ''; } };
+  let result: { ts: string; outcome: string; adapter: unknown; navigatorGpu: boolean; userAgent: string };
   try {
     const gpu = (navigator as unknown as { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
-    if (!gpu) { sttLog('log', '[STT-WEBGPU-PROBE] adapter=NULL (navigator.gpu undefined — WebGPU not exposed)'); return; }
-    const adapter = (await gpu.requestAdapter()) as { info?: Record<string, unknown>; name?: string } | null;
-    if (!adapter) { sttLog('log', '[STT-WEBGPU-PROBE] adapter=NULL (no GPU adapter available)'); return; }
-    const info = adapter.info ?? adapter.name ?? 'present';
-    sttLog('log', '[STT-WEBGPU-PROBE] adapter=PRESENT', typeof info === 'string' ? info : JSON.stringify(info));
+    if (!gpu) {
+      result = { ts: nowIso(), outcome: 'null-navigator-gpu-undefined', adapter: null, navigatorGpu: false, userAgent: navigator.userAgent };
+      sttLog('log', '[STT-WEBGPU-PROBE] adapter=NULL (navigator.gpu undefined — WebGPU not exposed)');
+    } else {
+      const adapter = (await gpu.requestAdapter()) as { info?: Record<string, unknown>; name?: string } | null;
+      if (!adapter) {
+        result = { ts: nowIso(), outcome: 'null-no-adapter', adapter: null, navigatorGpu: true, userAgent: navigator.userAgent };
+        sttLog('log', '[STT-WEBGPU-PROBE] adapter=NULL (no GPU adapter available)');
+      } else {
+        const info = adapter.info ?? adapter.name ?? 'present';
+        result = { ts: nowIso(), outcome: 'present', adapter: info, navigatorGpu: true, userAgent: navigator.userAgent };
+        sttLog('log', '[STT-WEBGPU-PROBE] adapter=PRESENT', typeof info === 'string' ? info : JSON.stringify(info));
+      }
+    }
   } catch (e) {
+    result = { ts: nowIso(), outcome: 'error', adapter: e instanceof Error ? e.message : String(e), navigatorGpu: false, userAgent: navigator.userAgent };
     sttLog('error', '[STT-WEBGPU-PROBE] adapter=ERROR', e instanceof Error ? e.message : String(e));
+  }
+  // Persist to a fixed project-root file (reuses the sandboxed fs:writeFile IPC).
+  try {
+    const cfg = await window.cth?.getConfig?.();
+    const root = cfg?.activeProjectPath;
+    if (!root) { sttLog('log', '[STT-WEBGPU-PROBE] no activeProjectPath — skipped file write'); return; }
+    const res = await window.cth?.writeFile?.(root, 'webgpu-probe.json', JSON.stringify(result, null, 2));
+    if (res?.ok) sttLog('log', '[STT-WEBGPU-PROBE] wrote', res.path);
+    else sttLog('error', '[STT-WEBGPU-PROBE] file write failed', res ? res.error : '(cth.writeFile unavailable)');
+  } catch (e) {
+    sttLog('error', '[STT-WEBGPU-PROBE] file write threw', e instanceof Error ? e.message : String(e));
   }
 })();
 

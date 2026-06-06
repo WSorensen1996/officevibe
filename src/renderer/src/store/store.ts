@@ -155,6 +155,13 @@ export function isAgentTab(tab: LeftTab): boolean {
  *  don't see the "add agent" prompt before Michael has clocked in. */
 export type GodStatus = 'booting' | 'ready' | 'failed';
 
+/** Which compute backend the dictation Whisper worker actually initialized on —
+ *  surfaced in Settings as the human's in-app proof of GPU vs CPU (task 5z52).
+ *  `device` is the real device the worker ended up using ('webgpu' | 'wasm'),
+ *  `adapter` the GPU description when on webgpu. null = no model loaded yet this
+ *  session (the worker only warms on the first dictation). */
+export interface SttBackend { device: string; adapter?: string }
+
 interface State {
   agents: Agent[];
   /** Agents whose terminal was closed — retained + flagged, kept off the active
@@ -193,6 +200,8 @@ interface State {
    *  (the pane auto-follows whoever browses). Transient. */
   browserPinnedAgentId: string | null;
   godStatus: GodStatus;
+  /** The compute backend the STT worker reported on its last model load (5z52). */
+  sttBackend: SttBackend | null;
   /** Per-agent outgoing message queue (agent id → messages awaiting delivery).
    *  Lets the user keep "talking" to a busy agent: messages park here and are
    *  drained to the terminal one-by-one once the agent is free. */
@@ -208,6 +217,7 @@ interface State {
   toolCounts: Record<string, number>;
   bumpToolCount: (id: string) => void;
   setGodStatus: (status: GodStatus) => void;
+  setSttBackend: (b: SttBackend | null) => void;
   select: (id: string) => void;
   updateAgent: (id: string, patch: Partial<Agent>) => void;
   pushFeed: (id: string, line: string) => void;
@@ -409,6 +419,7 @@ export const useStore = create<State>((set) => ({
   browserActive: false,
   browserPinnedAgentId: null,
   godStatus: 'booting',
+  sttBackend: null,
   messageQueues: initialQueues,
   floorStarted: false,
   startFloor: () => set({ floorStarted: true }),
@@ -416,6 +427,7 @@ export const useStore = create<State>((set) => ({
   bumpToolCount: (id) =>
     set((s) => ({ toolCounts: { ...s.toolCounts, [id]: (s.toolCounts[id] ?? 0) + 1 } })),
   setGodStatus: (status) => set({ godStatus: status }),
+  setSttBackend: (b) => set({ sttBackend: b }),
   select: (id) => set((s) => { persistAgents(s.agents, id); return { selectedId: id }; }),
   updateAgent: (id, patch) =>
     set((s) => ({ agents: s.agents.map(a => a.id === id ? { ...a, ...patch } : a) })),

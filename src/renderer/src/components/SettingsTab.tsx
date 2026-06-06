@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from 'react';
 import { type HarnessConfig, type EffortLevel, AGENT_EFFORTS } from '@/store/config';
+import { useStore } from '@/store/store';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import { ProjectSwitcher } from './ProjectSwitcher';
@@ -17,6 +18,15 @@ const STT_MODELS: { id: SttModelId; title: string; detail: string }[] = [
   { id: 'whisper-base.en', title: 'Standard', detail: 'More accurate · ~78 MB' },
   { id: 'whisper-tiny.en', title: 'Fast', detail: 'Quicker · ~44 MB, lower accuracy' }
 ];
+
+/** Human-readable label for the backend the dictation worker actually loaded on —
+ *  the in-app GPU-vs-CPU proof (task 5z52). null until the first dictation warms
+ *  the worker (it only loads the model on first mic use). */
+function sttBackendLabel(b: { device: string; adapter?: string } | null): string {
+  if (!b) return 'not detected yet — run a dictation once';
+  if (b.device === 'webgpu') return `GPU${b.adapter ? ` · ${b.adapter}` : ''}`;
+  return 'CPU (WASM)';
+}
 
 /** Read-only reference of the app's keyboard shortcuts, grouped by where they
  *  apply. Pure copy — keep in sync with the handlers in App.tsx, MicButton,
@@ -154,6 +164,8 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
 
   // ─── Dictation (speech-to-text) model ──────────────────────────────────────
   const [sttModel, setSttModel] = useState<SttModelId>(config.sttModel ?? 'whisper-base.en');
+  // The backend the STT worker last loaded on (GPU/CPU) — the human's in-app proof.
+  const sttBackend = useStore((s) => s.sttBackend);
   const pickSttModel = async (next: SttModelId) => {
     if (next === sttModel) return;
     const prev = sttModel;
@@ -342,7 +354,10 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
       <Section title="DICTATION">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
-            Which on-device model powers the mic. Both run fully offline on the CPU. Takes effect on your next dictation.
+            Which on-device model powers the mic. Runs fully offline. Takes effect on your next dictation.
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
+            Running on: <strong style={{ color: 'var(--cth-ink-900)' }}>{sttBackendLabel(sttBackend)}</strong>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             {STT_MODELS.map((m) => {

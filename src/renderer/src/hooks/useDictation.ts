@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { startRecording, type Recorder } from '@/lib/dictation/audio';
 import { sttLog } from '@/lib/dictation/log';
+import { useStore } from '@/store/store';
 
 /**
  * Push-to-talk dictation: tap to record, tap again to transcribe locally (CPU) and
@@ -59,7 +60,13 @@ async function ensureWorker(): Promise<void> {
     worker = w;
     w.onmessage = (e: MessageEvent) => {
       const m = e.data;
-      if (m.type === 'ready') { sttLog('log', 'worker ready'); resolve(); }
+      if (m.type === 'ready') {
+        // Record the backend the worker actually loaded on so Settings can show it
+        // (the human's in-app GPU-vs-CPU proof, task 5z52).
+        sttLog('log', 'worker ready', m.device ? `on ${m.device}` : '');
+        try { useStore.getState().setSttBackend({ device: m.device ?? 'wasm', adapter: m.adapter }); } catch { /* noop */ }
+        resolve();
+      }
       else if (m.type === 'error') { sttLog('error', 'worker init error:', m.message); reject(new Error(m.message || 'failed to load speech model')); }
       else if (m.type === 'result') { pending.get(m.id)?.resolve(m.text); pending.delete(m.id); }
       else if (m.type === 'result-error') { pending.get(m.id)?.reject(new Error(m.message)); pending.delete(m.id); }

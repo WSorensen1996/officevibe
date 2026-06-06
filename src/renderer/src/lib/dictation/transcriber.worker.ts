@@ -19,6 +19,12 @@ const ctx = self as unknown as Worker;
 // base model if an older host posts an init without a model field.
 let modelId = 'whisper-base.en';
 
+// The compute backend this worker actually loads the model on. Today (Phase-1)
+// always 'wasm' (CPU); Phase-2 sets it from the init message + drives device:'webgpu'
+// in pipeline(). Echoed back in the 'ready' message so Settings can show the human
+// which backend transcription is really running on (task 5z52).
+let device: 'webgpu' | 'wasm' = 'wasm';
+
 /** Log to the worker's own console (visible in DevTools) AND post to the hook,
  *  which relays it to the main process so it also lands in the dev terminal. */
 function log(level: 'log' | 'error', ...parts: unknown[]): void {
@@ -102,8 +108,8 @@ ctx.onmessage = async (e: MessageEvent) => {
       log('log', 'init received, base=', msg.base, 'model=', modelId);
       configure(msg.base);
       await getTranscriber(); // warm the model so the first dictation isn't cold
-      log('log', 'model ready');
-      ctx.postMessage({ type: 'ready' });
+      log('log', `model ready on ${device}`);
+      ctx.postMessage({ type: 'ready', device });
     } else if (msg.type === 'transcribe') {
       log('log', `transcribe start: ${msg.pcm.length} samples (~${(msg.pcm.length / 16000).toFixed(1)}s)`);
       const transcriber = await getTranscriber();
