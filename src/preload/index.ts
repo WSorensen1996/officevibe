@@ -163,6 +163,8 @@ export interface KnowledgeSkill {
   last_used_at: string | null;
   use_count: number;
   inject_count: number;
+  view_count: number;
+  patch_count: number;
 }
 
 export interface KnowledgeStatus {

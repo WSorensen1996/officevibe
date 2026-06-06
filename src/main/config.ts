@@ -77,8 +77,17 @@ export interface HarnessConfig {
   skillStaleAfterDays?: number;
   /** Days of inactivity before a stale skill is archived (moved aside, never deleted). */
   skillArchiveAfterDays?: number;
-  /** Max number of skills injected into an agent's context per task. */
+  /** Max number of skills HIGHLIGHTED as "most relevant" at the top of the injected
+   *  block. The full skill inventory is always injected (Hermes-style); this only
+   *  controls how many get the relevance call-out. */
   maxInjectedSkills?: number;
+  /** Token budget for the always-on skill inventory injected at task start (Hermes
+   *  "Level 0"). When the inventory would exceed this, it falls back to the
+   *  highest-ranked subset that fits. Roughly 4 chars/token. */
+  skillInventoryTokenBudget?: number;
+  /** How many pre-curation library snapshots to keep under knowledge/.backups (older
+   *  ones are pruned). */
+  curatorBackupKeep?: number;
   /** Skip the curator's LLM consolidation when 5h or 7d Claude usage exceeds this percent. */
   curatorUsageCeilingPercent?: number;
   /** Whisper dictation model: accurate 'whisper-base.en' (default) or lighter/faster
@@ -118,6 +127,8 @@ const DEFAULTS: HarnessConfig = {
   skillStaleAfterDays: 30,
   skillArchiveAfterDays: 90,
   maxInjectedSkills: 3,
+  skillInventoryTokenBudget: 3000,
+  curatorBackupKeep: 5,
   curatorUsageCeilingPercent: 80,
   sttModel: 'whisper-base.en',
   missions: [],

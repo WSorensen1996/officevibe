@@ -130,8 +130,11 @@ export class HookServer {
       // of whether we re-engage the agent below. Cursor-gated, so it's idempotent.
       if (event === 'Stop') {
         try {
-          const said = this.project.recordSpoken(agentId, p.transcript_path);
-          if (said.length) this.getWebContents()?.send('project:agentSaid', { agentId, says: said });
+          const { says, skillsUsed } = this.project.recordSpoken(agentId, p.transcript_path);
+          if (says.length) this.getWebContents()?.send('project:agentSaid', { agentId, says });
+          // Count genuine skill reuse from the finished turn's Skill-tool invocations
+          // (native skill loads emit no PostToolUse, so the transcript is the signal).
+          if (skillsUsed.length) this.knowledge.bumpUseForSkills(skillsUsed);
         } catch { /* best-effort — never block a Stop on capture */ }
       }
 
@@ -178,6 +181,14 @@ export class HookServer {
     if (event === 'PostToolUse' && p.tool_name === 'Read') {
       try { this.knowledge.bumpUseForPath((p.tool_input as { file_path?: string } | undefined)?.file_path); }
       catch { /* best-effort */ }
+    }
+    // …or when it invokes a skill via the native Skill tool (belt-and-suspenders with the
+    // Stop-transcript scan, in case this Claude Code version DOES emit a Skill PostToolUse).
+    if (event === 'PostToolUse' && p.tool_name === 'Skill') {
+      try {
+        const inp = p.tool_input;
+        this.knowledge.bumpUseForSkillName(typeof inp === 'string' ? inp : JSON.stringify(inp ?? ''));
+      } catch { /* best-effort */ }
     }
 
     // A Notification hook that means "the agent is blocked waiting for the user"

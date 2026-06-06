@@ -150,7 +150,7 @@ const HOP_CAP = 12;
 interface TranscriptEntry {
   type?: string;
   uuid?: string;
-  message?: { content?: Array<{ type?: string; text?: string }> };
+  message?: { content?: Array<{ type?: string; text?: string; name?: string; input?: unknown }> };
 }
 
 /** Per-utterance text cap, and a defensive ceiling on transcript size we'll read in
@@ -278,6 +278,8 @@ export class ProjectManager {
     // here so the spawn's `--add-dir <root>/knowledge` always points at an existing dir.
     mkdirSync(join(root, 'knowledge', '.claude', 'skills'), { recursive: true });
     mkdirSync(join(root, 'knowledge', 'proposals', '.done'), { recursive: true });
+    mkdirSync(join(root, 'knowledge', 'patches', '.done'), { recursive: true });
+    mkdirSync(join(root, 'knowledge', 'deliverables'), { recursive: true });
 
     // The hook shim: a dumb pipe between a `claude` hook and our UDS. The usage
     // shim: a `statusLine` command that records Claude's 5h/7d limit usage.
@@ -518,11 +520,12 @@ export class ProjectManager {
    * and `tool_use` blocks are excluded. Fast + synchronous + never throws — it runs inside
    * the hook handler and the shim self-kills after 5s.
    */
-  recordSpoken(agentId: string, transcriptPath: string | undefined): AgentSay[] {
+  recordSpoken(agentId: string, transcriptPath: string | undefined): { says: AgentSay[]; skillsUsed: string[] } {
+    const skillsUsed: string[] = [];
     try {
-      if (!transcriptPath || !existsSync(transcriptPath)) return [];
+      if (!transcriptPath || !existsSync(transcriptPath)) return { says: [], skillsUsed };
       const dir = this.agentDir(agentId);
-      if (!existsSync(dir)) return [];
+      if (!existsSync(dir)) return { says: [], skillsUsed };
 
       // Bound the synchronous read: parse the whole file normally, but for a
       // pathologically large transcript read only the trailing window. The cursor still
@@ -536,7 +539,7 @@ export class ProjectManager {
         } else {
           raw = readFileSync(transcriptPath, 'utf8');
         }
-      } catch { return []; }
+      } catch { return { says: [], skillsUsed }; }
 
       const cursorPath = join(dir, 'cursor.json');
       const cursor = this.readJson<{ lastProcessed: string | null; lastSpokenUuid?: string | null }>(
@@ -557,6 +560,15 @@ export class ProjectManager {
         if (!started) { if (uuid && uuid === cursor.lastSpokenUuid) started = true; continue; }
         if (uuid) lastUuid = uuid;                   // advance past every entry (even tool-only)
         if (rec.type !== 'assistant' || !Array.isArray(rec.message?.content)) continue;
+        // Detect native Skill-tool invocations so the harness can count real reuse —
+        // a Skill load doesn't emit a PostToolUse:Read, so this transcript scan is the
+        // only reliable signal. Capture the skill name + stringified input; the
+        // KnowledgeManager resolves each to a known slug.
+        for (const b of rec.message!.content!) {
+          if (b && b.type === 'tool_use' && typeof b.name === 'string' && b.name.toLowerCase() === 'skill') {
+            skillsUsed.push(typeof b.input === 'string' ? b.input : JSON.stringify(b.input ?? ''));
+          }
+        }
         const text = rec.message!.content!
           .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
           .map((b) => (b.text as string).trim())
@@ -575,16 +587,16 @@ export class ProjectManager {
       if (lastUuid && lastUuid !== (cursor.lastSpokenUuid ?? null)) {
         this.writeJson(cursorPath, { ...cursor, lastSpokenUuid: lastUuid });
       }
-      if (out.length === 0) return [];
+      if (out.length === 0) return { says: [], skillsUsed };
       appendFileSync(
         join(dir, 'says.jsonl'),
         out.map((s) => JSON.stringify(s)).join('\n') + '\n',
         'utf8'
       );
       this.appendLog({ kind: 'said', agentId, count: out.length });
-      return out;
+      return { says: out, skillsUsed };
     } catch {
-      return []; // best-effort — never crash the Stop hook
+      return { says: [], skillsUsed }; // best-effort — never crash the Stop hook
     }
   }
 
@@ -605,7 +617,7 @@ export class ProjectManager {
 
   private injectedPrompt(meta: AgentMeta, dir: string, root: string, semanticMemory: boolean, knowledge: boolean): string {
     const skillsLine = knowledge
-      ? '6. The team shares a growing SKILL library — reusable how-to for THIS project. At the START of a task you may receive a "RELEVANT PROJECT SKILLS" note; consult it and read a skill\'s full text from $KNOWLEDGE_DIR/.claude/skills/<slug>/SKILL.md before reinventing it. At the END of a task, if you discovered a REUSABLE procedure future tasks will repeat, capture it: write ONE JSON file into your outbox shaped {"type":"skill-proposal","slug":"kebab-name","title":"short title","description":"<=80 chars on what it does","tags":["topic"],"body":"# Title\\nstep-by-step procedure + gotchas"}. Reusable know-how only — one-off facts still go in memory.md.'
+      ? '6. The team shares a growing SKILL library — reusable how-to for THIS project. At task START you get a "PROJECT SKILLS" note listing the WHOLE library (★ = most relevant to your task); to use one, load its full procedure with the Skill tool (by its name/slug) and follow it before reinventing. CAPTURE at task END: if you discovered a REUSABLE procedure future tasks will repeat, write ONE JSON file into your outbox shaped {"type":"skill-proposal","slug":"kebab-name","title":"short title","description":"<=80 chars on what it does","tags":["topic"],"body":"# Title\\n## When to Use\\n…\\n## Procedure\\n1. …\\n## Pitfalls\\nfailure modes + fixes\\n## Verification\\nhow to confirm it worked"} — keep those four sections. CORRECT in-flight: if you find a skill wrong/incomplete WHILE using it, fix it immediately — outbox {"type":"skill-patch","slug":"<slug>","append":"what was wrong + the corrected steps"} (or "body" to fully rewrite). Reusable PROCEDURES only: one-off facts go in memory.md, and investigation reports / briefs / research DELIVERABLES go in $KNOWLEDGE_DIR/deliverables/<name>.md (NOT loose in $KNOWLEDGE_DIR, and NOT as skills).'
       : '';
     const memoryLine = semanticMemory
       ? 'Semantic memory: the whole team shares a searchable MemPalace at $MEMPALACE_PALACE_PATH. To recall relevant past knowledge across the team, run `mempalace search "<query>"`; run `mempalace wake-up` at the start of a task for a memory digest. Your notes in memory.md are mined into the palace automatically — write durable facts there.'
@@ -765,6 +777,7 @@ export class ProjectManager {
             Partial<ProjectMessage> & {
               type?: string; taskId?: string; kind?: string; text?: string;
               slug?: string; title?: string; description?: string; body?: string; tags?: unknown;
+              append?: string;
             };
           // A task-update is a board side-channel, NOT mail: handle it entirely
           // here so a missing/typo taskId can never fall through to routeMessage
@@ -773,6 +786,8 @@ export class ProjectManager {
             this.appendTaskUpdate(id, partial); // id = owning dir = authoritative author
           } else if (partial.type === 'skill-proposal') {
             this.stageSkillProposal(id, partial); // a learned skill → knowledge library
+          } else if (partial.type === 'skill-patch') {
+            this.stageSkillPatch(id, partial); // an in-flight correction → knowledge library
           } else {
             const msg = this.normalize(partial, id);
             msg.from = id; // sender is authoritative — the owning directory
@@ -887,6 +902,34 @@ export class ProjectManager {
     });
     this.appendLog({ kind: 'skill-proposal', by, slug });
     this.emit?.('project:skillProposal', { by, slug, title: title.slice(0, 120) });
+  }
+
+  /** Stage an in-flight skill correction (a `{type:"skill-patch"}` outbox file) into
+   *  knowledge/patches/ for the curator to apply on its next (idle-debounced) cycle.
+   *  Single-writer discipline mirrors stageSkillProposal: the agent proposes, the
+   *  harness applies. A patch with no slug or no body/append is logged, never routed. */
+  private stageSkillPatch(
+    by: string,
+    raw: { slug?: string; title?: string; description?: string; body?: string; append?: string; tags?: unknown }
+  ): void {
+    const root = this.root();
+    if (!root) return;
+    const slug = (typeof raw.slug === 'string' ? raw.slug : '')
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+    const body = typeof raw.body === 'string' ? raw.body.trim() : '';
+    const append = typeof raw.append === 'string' ? raw.append.trim() : '';
+    if (!slug || (!body && !append)) { this.appendLog({ kind: 'skill-patch-miss', by, reason: 'missing slug/body' }); return; }
+    const tags = Array.isArray(raw.tags) ? raw.tags.filter((t): t is string => typeof t === 'string').slice(0, 8) : [];
+    const patchesDir = join(root, 'knowledge', 'patches');
+    mkdirSync(join(patchesDir, '.done'), { recursive: true });
+    this.atomicWriteJson(join(patchesDir, `${stamp()}-${shortRand()}.json`), {
+      slug,
+      title: typeof raw.title === 'string' ? raw.title.slice(0, 120) : undefined,
+      description: typeof raw.description === 'string' ? raw.description.slice(0, 200) : undefined,
+      body, append, tags, by
+    });
+    this.appendLog({ kind: 'skill-patch', by, slug });
+    this.emit?.('project:skillProposal', { by, slug, title: (raw.title ?? slug).slice(0, 120) });
   }
 
   memory(id: string): string {

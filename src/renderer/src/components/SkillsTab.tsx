@@ -131,7 +131,7 @@ function SkillRow({ skill, onView, onEdit, onArchive, onRestore, onDelete }: {
       <div style={{ fontSize: 12, color: 'var(--cth-ink-700)', marginTop: 3 }}>{skill.desc}</div>
 
       <div style={{ display: 'flex', gap: 10, marginTop: 4, fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-500)' }}>
-        <span>used {skill.use_count}× · injected {skill.inject_count}×</span>
+        <span>used {skill.use_count}× · injected {skill.inject_count}×{skill.patch_count > 0 ? ` · patched ${skill.patch_count}×` : ''}</span>
         <span>last used {used}</span>
         {skill.tags.length > 0 && <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>#{skill.tags.join(' #')}</span>}
       </div>

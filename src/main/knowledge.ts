@@ -43,16 +43,27 @@ export interface SkillIndexEntry {
   path?: string;
 }
 
-/** Per-skill telemetry + provenance (the curator's source of truth). */
+/** Per-skill telemetry + provenance (the curator's source of truth).
+ *  Mirrors hermes-agent's `.usage.json`: use/view/patch counts each with their own
+ *  last-* timestamp, plus `last_injected_at` so the lifecycle can keep a skill that's
+ *  being surfaced every task alive even if it isn't opened. */
 export interface SkillUsage {
   slug: string;
   title: string;
   created_at: string;            // ISO
-  last_used_at: string | null;   // ISO; null until first read
+  last_used_at: string | null;   // ISO; null until first genuine use (Skill-tool/body-read)
   use_count: number;
   inject_count: number;
+  /** Times an agent loaded/opened the skill (body read or native Skill-tool view). */
+  view_count: number;
+  last_viewed_at: string | null;
+  /** Last time the skill appeared in an injected inventory (recall surfacing). */
+  last_injected_at: string | null;
+  /** Times the skill was corrected in-flight via a skill-patch. */
+  patch_count: number;
+  last_patched_at: string | null;
   state: SkillState;
-  created_by: string;            // agent id, or 'curator'
+  created_by: string;            // agent id, 'curator', or 'human'
   pinned: boolean;               // pinned skills are exempt from auto-archival
 }
 
@@ -69,6 +80,8 @@ export interface SkillAdminRow {
   last_used_at: string | null;
   use_count: number;
   inject_count: number;
+  view_count: number;
+  patch_count: number;
 }
 
 /** A staged proposal an agent dropped (validated/shaped by ProjectManager.routeOnce). */
@@ -77,6 +90,21 @@ export interface SkillProposal {
   title?: string;
   description?: string;
   body?: string;
+  tags?: string[];
+  by?: string;
+}
+
+/** An in-flight correction to an existing skill (hermes-agent's `skill_patch`): an
+ *  agent that found a skill wrong/incomplete while using it rewrites or appends to it
+ *  immediately, instead of waiting for the periodic curator pass. */
+export interface SkillPatch {
+  slug: string;
+  /** Full replacement body. */
+  body?: string;
+  /** Markdown appended under a "## Correction" heading (when no full body given). */
+  append?: string;
+  title?: string;
+  description?: string;
   tags?: string[];
   by?: string;
 }
@@ -93,11 +121,73 @@ const SUMMARY_DIGEST_STOPWORDS = new Set([
   'any', 'use', 'using', 'task', 'please', 'need', 'want', 'make', 'add', 'get'
 ]);
 
+/** A provisional skill graduates to `active` once it has been genuinely used (a
+ *  Skill-tool invocation or a full-body read) this many times. The old bar of 2 was
+ *  unreachable because native skill loads were never counted; 1 genuine use is a fair
+ *  proof now that the signal works. */
+const SKILL_GRADUATE_USES = 1;
+
+/** Cheap, conservative "is this skill body dangerous?" scan applied before a proposal
+ *  is promoted (hermes-agent gates hub skills with a security scanner; ours are
+ *  self-authored so the risk is lower, but a learned skill that bakes in a destructive
+ *  command or a prompt-injection string should be quarantined for human review). */
+const UNSAFE_SKILL_PATTERNS: Array<{ re: RegExp; why: string }> = [
+  { re: /\brm\s+-rf?\s+[~/.*]/i, why: 'recursive force-delete of a root/home/wildcard path' },
+  { re: /\b(mkfs|dd\s+if=|:\(\)\s*\{\s*:\|:&\s*\};:)/i, why: 'disk-format / fork-bomb' },
+  { re: /\bcurl\b[^\n|]*\|\s*(sudo\s+)?(ba)?sh\b/i, why: 'pipe-from-internet to shell' },
+  { re: /\b(ignore|disregard)\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts?)\b/i, why: 'prompt-injection directive' },
+  { re: /\b(exfiltrat|send\s+(the\s+)?(env|secrets?|credentials?|api[_-]?keys?))\b/i, why: 'data-exfiltration directive' },
+  { re: /\b(AWS_SECRET|ANTHROPIC_API_KEY|process\.env\.[A-Z_]*(KEY|SECRET|TOKEN))\b/, why: 'reads a secret/credential env var' }
+];
+
+/** Returns the first reason a skill body looks unsafe, or null when it's clean. */
+function unsafeReason(body: string): string | null {
+  for (const { re, why } of UNSAFE_SKILL_PATTERNS) if (re.test(body)) return why;
+  return null;
+}
+
 function stamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-');
 }
 function shortRand(): string {
   return randomBytes(3).toString('hex');
+}
+
+/** Build a fresh usage record with every telemetry field initialized — the single
+ *  source of truth so new fields can't be forgotten at a construction site. */
+function newUsage(
+  slug: string, title: string, created_by: string, state: SkillState, nowIso: string
+): SkillUsage {
+  return {
+    slug, title,
+    created_at: nowIso, last_used_at: null,
+    use_count: 0, inject_count: 0,
+    view_count: 0, last_viewed_at: null,
+    last_injected_at: null,
+    patch_count: 0, last_patched_at: null,
+    state, created_by, pinned: false
+  };
+}
+
+/** Coerce a possibly-old usage record (missing the newer telemetry fields) into a
+ *  complete one, so reads of a pre-upgrade usage.json never produce NaN/undefined. */
+function fillUsage(u: Partial<SkillUsage> & { slug: string }): SkillUsage {
+  return {
+    slug: u.slug,
+    title: u.title ?? u.slug,
+    created_at: u.created_at ?? '',
+    last_used_at: u.last_used_at ?? null,
+    use_count: u.use_count ?? 0,
+    inject_count: u.inject_count ?? 0,
+    view_count: u.view_count ?? 0,
+    last_viewed_at: u.last_viewed_at ?? null,
+    last_injected_at: u.last_injected_at ?? null,
+    patch_count: u.patch_count ?? 0,
+    last_patched_at: u.last_patched_at ?? null,
+    state: u.state ?? 'provisional',
+    created_by: u.created_by ?? 'agent',
+    pinned: u.pinned ?? false
+  };
 }
 
 export class KnowledgeManager {
@@ -122,8 +212,14 @@ export class KnowledgeManager {
   private indexPath(): string | null { const k = this.knowledgeDir(); return k ? join(k, 'index.json') : null; }
   private usagePath(): string | null { const k = this.knowledgeDir(); return k ? join(k, 'usage.json') : null; }
   private proposalsDir(): string | null { const k = this.knowledgeDir(); return k ? join(k, 'proposals') : null; }
+  private patchesDir(): string | null { const k = this.knowledgeDir(); return k ? join(k, 'patches') : null; }
   private archiveDir(): string | null { const k = this.knowledgeDir(); return k ? join(k, '.archive') : null; }
   private backupsDir(): string | null { const k = this.knowledgeDir(); return k ? join(k, '.backups') : null; }
+  /** Browsable project documents (investigations, briefs, research) — NOT recallable
+   *  skills. Kept out of `.claude/skills/` so they never pollute skill injection. */
+  deliverablesDir(): string | null { const k = this.knowledgeDir(); return k ? join(k, 'deliverables') : null; }
+  private curatorStatePath(): string | null { const k = this.knowledgeDir(); return k ? join(k, '.curator-state.json') : null; }
+  private curatorLogsDir(): string | null { const k = this.knowledgeDir(); return k ? join(k, 'logs', 'curator') : null; }
 
   /** Create the library skeleton + seed empty index/usage. Idempotent; no-op when disabled. */
   ensureScaffold(): void {
@@ -138,11 +234,44 @@ export class KnowledgeManager {
       mkdirSync(join(proposals, '.done'), { recursive: true });
       mkdirSync(this.archiveDir()!, { recursive: true });
       mkdirSync(this.backupsDir()!, { recursive: true });
+      mkdirSync(this.deliverablesDir()!, { recursive: true });
+      mkdirSync(this.curatorLogsDir()!, { recursive: true });
       if (!existsSync(idx)) this.writeJson(idx, [] as SkillIndexEntry[]);
       if (!existsSync(usage)) this.writeJson(usage, {} as Record<string, SkillUsage>);
+      const moved = this.migrateBareDeliverables();
+      if (moved) console.log(`[knowledge] filed ${moved} orphan deliverable(s) under deliverables/`);
     } catch (e) {
       console.error('[knowledge] ensureScaffold failed:', e);
     }
+  }
+
+  /** One-time tidy (idempotent): relocate any bare top-level knowledge/<file>.md that is
+   *  neither a native skill nor referenced by an index entry's `path` into deliverables/,
+   *  so stray investigation docs stop sitting beside the skill library. Never touches
+   *  index-referenced files or native skills. Returns the number moved. */
+  private migrateBareDeliverables(): number {
+    const k = this.knowledgeDir();
+    const dest = this.deliverablesDir();
+    if (!k || !dest || !existsSync(k)) return 0;
+    let moved = 0;
+    try {
+      const index = this.readIndex();
+      const referenced = new Set(index.map((e) => (e.path ?? `${e.slug}.md`).split(/[/\\]/).pop()!));
+      const skillSlugs = new Set(index.filter((e) => !e.path).map((e) => e.slug));
+      const files = readdirSync(k).filter((f) => f.endsWith('.md'));
+      for (const f of files) {
+        const slug = this.sanitizeSlug(f.replace(/\.md$/i, ''));
+        if (referenced.has(f) || skillSlugs.has(slug)) continue; // keep registered/referenced
+        mkdirSync(dest, { recursive: true });
+        const target = join(dest, f);
+        if (existsSync(target)) continue; // already migrated a same-named file
+        renameSync(join(k, f), target);
+        moved++;
+      }
+    } catch (e) {
+      console.error('[knowledge] migrateBareDeliverables failed:', e);
+    }
+    return moved;
   }
 
   // — hot path: ranking + injection (sync, in-process, no subprocess) —
@@ -151,7 +280,7 @@ export class KnowledgeManager {
    *  recency and state break ties. Returns [] when disabled/empty. Never throws. */
   rankForPrompt(prompt: string, k: number): SkillIndexEntry[] {
     if (!this.enabled() || !prompt) return [];
-    const index = this.readIndex().filter((e) => e.state !== 'archived');
+    const index = this.readIndex().filter((e) => e.state !== 'archived' && !e.path);
     if (index.length === 0) return [];
     const tokens = this.tokenize(prompt);
     if (tokens.length === 0) return [];
@@ -179,43 +308,80 @@ export class KnowledgeManager {
     return scored.slice(0, Math.max(0, k)).map((s) => s.e);
   }
 
-  /** The `additionalContext` block injected on UserPromptSubmit. Bumps inject_count
-   *  for the shown skills. '' when disabled or nothing relevant. */
+  /** The `additionalContext` block injected on UserPromptSubmit. Hermes-style: the
+   *  WHOLE active/provisional inventory (name + desc) is listed so the agent is never
+   *  blind to a capability it owns, with the prompt's most-relevant skills HIGHLIGHTED
+   *  at the top. The agent loads a skill's full procedure on demand via the native
+   *  Skill tool (by slug). Bumps inject_count for everything shown. '' when empty. */
   injectionBlock(prompt: string): string {
     if (!this.enabled()) return '';
-    const k = this.getConfig().maxInjectedSkills ?? 3;
-    const picks = this.rankForPrompt(prompt, k);
-    if (picks.length === 0) return '';
-    const dir = this.skillsDir();
-    this.bumpInject(picks.map((p) => p.slug));
-    const lines = picks.map((p) => {
-      const bodyPath = this.bodyPathFor(p.slug, p.path) ?? (dir ? join(dir, p.slug, 'SKILL.md') : p.slug);
-      return `• ${p.title} — ${p.desc} [load full: read ${bodyPath}]`;
-    });
-    return [
-      'RELEVANT PROJECT SKILLS — the team has learned these for this project; consult them before starting (load a skill\'s full text by reading its file):',
-      ...lines
-    ].join('\n');
-  }
-
-  /** A short overview injected on SessionStart so a fresh agent knows the library exists. */
-  sessionStartDigest(): string {
-    if (!this.enabled()) return '';
-    const index = this.readIndex().filter((e) => e.state === 'active' || e.state === 'provisional');
+    // Only real skills (native SKILL.md) are recallable — bare deliverables (entries
+    // with a `path`: briefs/research/investigations) are browsable in the admin tab but
+    // never injected as skills.
+    const index = this.readIndex().filter((e) => (e.state === 'active' || e.state === 'provisional') && !e.path);
     if (index.length === 0) return '';
-    const usage = this.readUsage();
-    const top = [...index]
-      .sort((a, b) => (usage[b.slug]?.use_count ?? 0) - (usage[a.slug]?.use_count ?? 0))
-      .slice(0, Math.max(3, (this.getConfig().maxInjectedSkills ?? 3) * 2));
-    const dir = this.skillsDir();
+    const budget = this.getConfig().skillInventoryTokenBudget ?? 3000;
+    const highlightK = this.getConfig().maxInjectedSkills ?? 3;
+    const highlight = new Set(this.rankForPrompt(prompt, highlightK).map((p) => p.slug));
+    const { lines, shownSlugs, omitted } = this.inventoryLines(index, highlight, budget);
+    if (shownSlugs.length === 0) return '';
+    this.bumpInject(shownSlugs);
     return [
-      `This project has a shared SKILL library (${index.length} skill${index.length === 1 ? '' : 's'}) the team built from experience. Most-used:`,
-      ...top.map((e) => `• ${e.title} — ${e.desc}`),
-      dir ? `Browse/read them under ${dir}; you'll also get a per-task "relevant skills" note.` : ''
+      'PROJECT SKILLS — reusable how-to the team has learned for THIS project. ★ = most relevant to your current task. Before reinventing a procedure, load the skill\'s full text with the Skill tool (by its name/slug) and follow it.',
+      ...lines,
+      omitted > 0 ? `…and ${omitted} more — list them with the Skill tool if none above fit.` : ''
     ].filter(Boolean).join('\n');
   }
 
-  /** Bump use_count when an agent reads a skill file (driven by the PostToolUse hook). */
+  /** A full-inventory overview injected on SessionStart so a fresh agent knows
+   *  everything the team has learned (sorted by most-used), within the token budget. */
+  sessionStartDigest(): string {
+    if (!this.enabled()) return '';
+    const index = this.readIndex().filter((e) => (e.state === 'active' || e.state === 'provisional') && !e.path);
+    if (index.length === 0) return '';
+    const usage = this.readUsage();
+    const sorted = [...index].sort(
+      (a, b) => (usage[b.slug]?.use_count ?? 0) - (usage[a.slug]?.use_count ?? 0)
+    );
+    const budget = this.getConfig().skillInventoryTokenBudget ?? 3000;
+    const { lines, omitted } = this.inventoryLines(sorted, new Set(), budget);
+    return [
+      `This project has a shared SKILL library (${index.length} skill${index.length === 1 ? '' : 's'}) the team built from experience. Load any skill's full procedure with the Skill tool (by name) before reinventing it:`,
+      ...lines,
+      omitted > 0 ? `…and ${omitted} more.` : '',
+      'You\'ll also get a per-task "★ most relevant" note.'
+    ].filter(Boolean).join('\n');
+  }
+
+  /** Render an ordered inventory into bullet lines that fit a token budget (~4 chars/
+   *  token). Highlighted slugs are starred and always sort first (preserving their
+   *  incoming order); the rest follow in their incoming order. Returns the lines, the
+   *  slugs actually shown (for inject-count bumping), and how many were dropped. */
+  private inventoryLines(
+    entries: SkillIndexEntry[], highlight: Set<string>, budgetTokens: number
+  ): { lines: string[]; shownSlugs: string[]; omitted: number } {
+    const ordered = [
+      ...entries.filter((e) => highlight.has(e.slug)),
+      ...entries.filter((e) => !highlight.has(e.slug))
+    ];
+    const charBudget = Math.max(0, budgetTokens) * 4;
+    const lines: string[] = [];
+    const shownSlugs: string[] = [];
+    let used = 0;
+    for (const e of ordered) {
+      const mark = highlight.has(e.slug) ? '★' : '•';
+      const desc = e.desc ? ` — ${e.desc}` : '';
+      const line = `${mark} ${e.title} (${e.slug})${desc}`;
+      if (used + line.length + 1 > charBudget && lines.length > 0) break;
+      lines.push(line);
+      shownSlugs.push(e.slug);
+      used += line.length + 1;
+    }
+    return { lines, shownSlugs, omitted: ordered.length - shownSlugs.length };
+  }
+
+  /** Count a genuine use when an agent READS a skill's SKILL.md body (PostToolUse:Read).
+   *  A body read is both a view and real reuse. */
   bumpUseForPath(absPath: string | undefined): void {
     if (!this.enabled() || !absPath) return;
     const dir = this.skillsDir();
@@ -223,20 +389,65 @@ export class KnowledgeManager {
     const rest = absPath.slice(dir.length).replace(/^[/\\]+/, '');
     const slug = rest.split(/[/\\]/)[0];
     if (!slug) return;
+    this.applyUses([slug], true);
+  }
+
+  /** Count a genuine use when an agent invokes a skill via the native Skill tool. The
+   *  identifiers are the Skill tool inputs (or skill names) seen in the finished turn's
+   *  transcript — each is resolved to a known slug (by slug or title match), so we don't
+   *  depend on the exact Skill-tool input shape. This is the DEFINITIVE reuse signal:
+   *  native skill loads don't emit a Read, so without this use_count never moved. */
+  bumpUseForSkills(identifiers: string[]): void {
+    if (!this.enabled() || identifiers.length === 0) return;
+    const slugs = this.resolveSlugs(identifiers);
+    if (slugs.length) this.applyUses(slugs, true);
+  }
+  /** Single-name convenience for the PostToolUse:Skill hook branch. */
+  bumpUseForSkillName(name: string | undefined): void {
+    if (name) this.bumpUseForSkills([name]);
+  }
+
+  /** Resolve free-form identifiers (Skill-tool inputs / names) to known slugs by exact
+   *  slug match or by the identifier containing/equaling a slug or sanitized title. */
+  private resolveSlugs(identifiers: string[]): string[] {
+    const index = this.readIndex();
+    const out = new Set<string>();
+    for (const raw of identifiers) {
+      const hay = (raw ?? '').toLowerCase();
+      if (!hay) continue;
+      const norm = this.sanitizeSlug(raw);
+      for (const e of index) {
+        const titleSlug = this.sanitizeSlug(e.title);
+        if (norm === e.slug || hay.includes(e.slug) || (titleSlug && hay.includes(titleSlug))) out.add(e.slug);
+      }
+    }
+    return [...out];
+  }
+
+  /** Apply N uses (and views) to a set of slugs, graduating provisional→active once a
+   *  skill has been genuinely used SKILL_GRADUATE_USES times. Best-effort. */
+  private applyUses(slugs: string[], alsoView: boolean): void {
     try {
       const usage = this.readUsage();
-      const u = usage[slug];
-      if (!u) return;
-      u.use_count += 1;
-      u.last_used_at = new Date().toISOString();
-      // Cheap graduation: a provisional skill that's actually been used twice is trusted.
-      if (u.state === 'provisional' && u.use_count >= 2) {
-        u.state = 'active';
-        this.setIndexState(slug, 'active');
+      const nowIso = new Date().toISOString();
+      let touched = false;
+      const graduate: string[] = [];
+      for (const slug of slugs) {
+        const u = usage[slug];
+        if (!u) continue;
+        u.use_count += 1;
+        u.last_used_at = nowIso;
+        if (alsoView) { u.view_count += 1; u.last_viewed_at = nowIso; }
+        if (u.state === 'provisional' && u.use_count >= SKILL_GRADUATE_USES) {
+          u.state = 'active';
+          graduate.push(slug);
+        }
+        touched = true;
       }
-      this.writeJson(this.usagePath()!, usage);
+      if (touched) this.writeJson(this.usagePath()!, usage);
+      for (const slug of graduate) this.setIndexState(slug, 'active');
     } catch (e) {
-      console.error('[knowledge] bumpUseForPath failed:', e);
+      console.error('[knowledge] applyUses failed:', e);
     }
   }
 
@@ -256,6 +467,7 @@ export class KnowledgeManager {
     const usage = this.readUsage();
     const bySlug = new Map(index.map((e) => [e.slug, e] as const));
     const doneDir = join(pdir, '.done');
+    const quarantineDir = join(pdir, '.quarantine');
     mkdirSync(doneDir, { recursive: true });
     let promoted = 0;
 
@@ -269,6 +481,16 @@ export class KnowledgeManager {
         if (!slug || !title || !body) { renameSync(full, join(doneDir, `bad-${f}`)); continue; }
         if (bySlug.has(slug)) { renameSync(full, join(doneDir, f)); continue; } // collision → curator merges
 
+        // Trust gate: a learned skill that bakes in a destructive command or an injection
+        // string is quarantined for human review instead of being silently relied upon.
+        const danger = unsafeReason(body);
+        if (danger) {
+          mkdirSync(quarantineDir, { recursive: true });
+          renameSync(full, join(quarantineDir, f));
+          console.warn(`[knowledge] quarantined proposal ${slug}: ${danger}`);
+          continue;
+        }
+
         const sdir = join(skills, slug);
         mkdirSync(sdir, { recursive: true });
         writeFileSync(join(sdir, 'SKILL.md'), this.renderSkillMd(slug, title, p.description ?? '', body), 'utf8');
@@ -277,12 +499,7 @@ export class KnowledgeManager {
         const entry: SkillIndexEntry = { slug, title, desc, tags: (p.tags ?? []).slice(0, 8), state: 'provisional' };
         index.push(entry);
         bySlug.set(slug, entry);
-        const nowIso = new Date().toISOString();
-        usage[slug] = {
-          slug, title, created_at: nowIso, last_used_at: null,
-          use_count: 0, inject_count: 0, state: 'provisional',
-          created_by: p.by || 'agent', pinned: false
-        };
+        usage[slug] = newUsage(slug, title, p.by || 'agent', 'provisional', new Date().toISOString());
         renameSync(full, join(doneDir, f));
         promoted += 1;
       } catch {
@@ -291,6 +508,33 @@ export class KnowledgeManager {
     }
     if (promoted > 0) { this.writeJson(this.indexPath()!, index); this.writeJson(this.usagePath()!, usage); }
     return promoted;
+  }
+
+  /** Apply every staged in-flight correction (knowledge/patches/*.json → applyPatch),
+   *  moving each to patches/.done. Returns how many were applied. */
+  applyStagedPatches(): number {
+    if (!this.enabled()) return 0;
+    const pdir = this.patchesDir();
+    if (!pdir || !existsSync(pdir)) return 0;
+    let files: string[];
+    try { files = readdirSync(pdir).filter((f) => f.endsWith('.json')); } catch { return 0; }
+    if (files.length === 0) return 0;
+    const doneDir = join(pdir, '.done');
+    mkdirSync(doneDir, { recursive: true });
+    let applied = 0;
+    for (const f of files) {
+      const full = join(pdir, f);
+      try {
+        const patch = JSON.parse(readFileSync(full, 'utf8')) as SkillPatch;
+        const res = this.applyPatch(patch);
+        renameSync(full, join(doneDir, res.ok ? f : `bad-${f}`));
+        if (res.ok) applied += 1;
+        else console.warn(`[knowledge] patch ${patch?.slug} rejected: ${res.error}`);
+      } catch {
+        try { renameSync(full, join(doneDir, `bad-${f}`)); } catch { /* noop */ }
+      }
+    }
+    return applied;
   }
 
   // — lifecycle: pure stale → archive transitions (no LLM) —
@@ -311,7 +555,14 @@ export class KnowledgeManager {
       const u = usage[e.slug];
       if (!u || u.pinned) continue;
       if (u.created_by === 'human') continue; // protect hand-authored skills; manage agent/curator ones
-      const anchor = u.last_used_at ? Date.parse(u.last_used_at) : Date.parse(u.created_at);
+      // Anchor on the most recent sign of life — used, injected, or created. A skill the
+      // team keeps surfacing every task must not age out just because it was opened via
+      // the native Skill tool (which historically left last_used_at null).
+      const anchor = Math.max(
+        u.last_used_at ? Date.parse(u.last_used_at) : 0,
+        u.last_injected_at ? Date.parse(u.last_injected_at) : 0,
+        u.created_at ? Date.parse(u.created_at) : 0
+      );
       const idle = now - anchor;
       if (idle > archiveMs) {
         this.archiveSkillFiles(e.slug);
@@ -335,10 +586,15 @@ export class KnowledgeManager {
     try {
       mkdirSync(backups, { recursive: true });
       const dest = join(backups, `${stamp()}-${reason}`);
-      cpSync(k, dest, {
-        recursive: true,
-        filter: (src) => !src.includes(`${'.backups'}`) // never copy the backups dir into itself
-      });
+      mkdirSync(dest, { recursive: true });
+      // Copy each top-level entry EXCEPT the transient dirs. We must NOT cpSync(k, dest)
+      // because dest lives under k/.backups — Node's cpSync rejects copying a directory
+      // into its own subtree (ERR_FS_CP_EINVAL) before any filter runs.
+      const skip = new Set(['.backups', 'logs']);
+      for (const entry of readdirSync(k)) {
+        if (skip.has(entry)) continue;
+        cpSync(join(k, entry), join(dest, entry), { recursive: true });
+      }
       return dest;
     } catch (e) {
       console.error('[knowledge] backup failed:', e);
@@ -347,16 +603,20 @@ export class KnowledgeManager {
   }
 
   /** Apply merges (umbrella absorbs siblings → siblings archived) and archives. Always
-   *  backs up first; never deletes. Returns the number of ops applied. */
-  applyCuratorPlan(plan: CuratorPlan): number {
+   *  backs up first; never deletes; writes a reversible REPORT with the old→new rename
+   *  map so a bad consolidation can be understood and undone. Returns the ops applied.
+   *  `source` labels the run in the report ('consolidate' = LLM, 'dedup' = fast-path). */
+  applyCuratorPlan(plan: CuratorPlan, source = 'consolidate'): number {
     if (!this.enabled() || !plan) return 0;
     const skills = this.skillsDir();
     if (!skills) return 0;
-    this.backup('consolidate');
+    const backupDir = this.backup('consolidate');
     const index = this.readIndex();
     const usage = this.readUsage();
     const bySlug = new Map(index.map((e) => [e.slug, e] as const));
     let ops = 0;
+    const renameMap: Array<{ from: string; to: string }> = []; // absorbed → umbrella
+    const archived: string[] = [];
 
     for (const m of plan.merge ?? []) {
       const absorb = (m.absorb ?? []).map((s) => this.sanitizeSlug(s)).filter((s) => s && bySlug.has(s));
@@ -374,10 +634,7 @@ export class KnowledgeManager {
 
       if (existing) { existing.title = title; existing.desc = desc; existing.state = existing.state === 'archived' ? 'active' : existing.state; }
       else { const e2: SkillIndexEntry = { slug: umbrellaSlug, title, desc, tags: [], state: 'active' }; index.push(e2); bySlug.set(umbrellaSlug, e2); }
-      usage[umbrellaSlug] = usage[umbrellaSlug] ?? {
-        slug: umbrellaSlug, title, created_at: new Date().toISOString(), last_used_at: null,
-        use_count: 0, inject_count: 0, state: 'active', created_by: 'curator', pinned: false
-      };
+      usage[umbrellaSlug] = usage[umbrellaSlug] ?? newUsage(umbrellaSlug, title, 'curator', 'active', new Date().toISOString());
       usage[umbrellaSlug].state = 'active';
 
       for (const s of absorb) {
@@ -385,6 +642,7 @@ export class KnowledgeManager {
         this.archiveSkillFiles(s);
         const e3 = bySlug.get(s); if (e3) e3.state = 'archived';
         if (usage[s]) usage[s].state = 'archived';
+        renameMap.push({ from: s, to: umbrellaSlug });
         ops++;
       }
       ops++;
@@ -398,18 +656,165 @@ export class KnowledgeManager {
       this.archiveSkillFiles(s);
       e.state = 'archived';
       if (usage[s]) usage[s].state = 'archived';
+      archived.push(s);
       ops++;
     }
 
-    if (ops > 0) { this.writeJson(this.indexPath()!, index); this.writeJson(this.usagePath()!, usage); }
+    if (ops > 0) {
+      this.writeJson(this.indexPath()!, index);
+      this.writeJson(this.usagePath()!, usage);
+      this.writeReport({ source, ops, renameMap, archived, backupDir });
+      this.pruneBackups(this.getConfig().curatorBackupKeep ?? 5);
+    }
     return ops;
+  }
+
+  /** Write a per-run REPORT.md + run.json under knowledge/logs/curator/<ts>/ so every
+   *  consolidation is explainable and reversible (which backup, what was renamed/
+   *  archived). Best-effort. */
+  private writeReport(r: { source: string; ops: number; renameMap: Array<{ from: string; to: string }>; archived: string[]; backupDir: string | null }): void {
+    const dir = this.curatorLogsDir();
+    if (!dir) return;
+    try {
+      const runDir = join(dir, `${stamp()}-${r.source}`);
+      mkdirSync(runDir, { recursive: true });
+      const md = [
+        `# Curator run — ${r.source}`,
+        '',
+        `- when: ${new Date().toISOString()}`,
+        `- ops applied: ${r.ops}`,
+        `- restore from backup: ${r.backupDir ?? '(none)'}`,
+        '',
+        '## Merged (old → umbrella)',
+        ...(r.renameMap.length ? r.renameMap.map((m) => `- \`${m.from}\` → \`${m.to}\``) : ['- (none)']),
+        '',
+        '## Archived',
+        ...(r.archived.length ? r.archived.map((s) => `- \`${s}\``) : ['- (none)'])
+      ].join('\n');
+      writeFileSync(join(runDir, 'REPORT.md'), `${md}\n`, 'utf8');
+      this.writeJson(join(runDir, 'run.json'), r);
+    } catch (e) {
+      console.error('[knowledge] writeReport failed:', e);
+    }
+  }
+
+  /** Keep only the newest `keep` pre-curation snapshots under .backups/; remove older. */
+  private pruneBackups(keep: number): void {
+    const backups = this.backupsDir();
+    if (!backups || !existsSync(backups) || keep < 0) return;
+    try {
+      const dirs = readdirSync(backups).filter((n) => !n.startsWith('.')).sort(); // stamp prefix → chronological
+      for (const old of dirs.slice(0, Math.max(0, dirs.length - keep))) {
+        rmSync(join(backups, old), { recursive: true, force: true });
+      }
+    } catch (e) {
+      console.error('[knowledge] pruneBackups failed:', e);
+    }
+  }
+
+  /** Persisted curator cadence timestamp (so the 6h consolidation throttle survives app
+   *  restarts instead of resetting to "always due" every launch). */
+  loadCuratorTimestamp(): number {
+    const p = this.curatorStatePath();
+    if (!p || !existsSync(p)) return 0;
+    try { const v = JSON.parse(readFileSync(p, 'utf8')) as { lastConsolidateAt?: number }; return typeof v.lastConsolidateAt === 'number' ? v.lastConsolidateAt : 0; }
+    catch { return 0; }
+  }
+  saveCuratorTimestamp(ms: number): void {
+    const p = this.curatorStatePath();
+    if (!p) return;
+    try { this.writeJson(p, { lastConsolidateAt: ms }); } catch { /* best-effort */ }
+  }
+
+  /** In-flight correction (hermes-agent's skill_patch): rewrite or append to an existing
+   *  skill the moment an agent finds it wrong/incomplete. Backs up first; bumps
+   *  patch_count. Returns ok=false when the slug is unknown. */
+  applyPatch(patch: SkillPatch): { ok: boolean; error?: string } {
+    if (!this.enabled()) return { ok: false, error: 'disabled' };
+    const skills = this.skillsDir();
+    if (!skills) return { ok: false, error: 'no skills directory' };
+    const slug = this.sanitizeSlug(patch.slug);
+    const index = this.readIndex();
+    const entry = index.find((e) => e.slug === slug);
+    if (!entry) return { ok: false, error: `unknown skill "${slug}"` };
+
+    const newBody = (patch.body ?? '').trim();
+    const append = (patch.append ?? '').trim();
+    if (!newBody && !append) return { ok: false, error: 'patch needs body or append' };
+    const danger = unsafeReason(newBody || append);
+    if (danger) return { ok: false, error: `rejected: ${danger}` };
+
+    this.backup('patch');
+    const title = (patch.title ?? entry.title).trim() || entry.title;
+    const desc = this.clampDesc(patch.description ?? entry.desc);
+    let body = newBody;
+    if (!body) {
+      const current = this.readSkillBody(slug).replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+      body = `${current}\n\n## Correction (${new Date().toISOString().slice(0, 10)})\n\n${append}`;
+    }
+    try {
+      const sdir = join(skills, slug);
+      mkdirSync(sdir, { recursive: true });
+      writeFileSync(join(sdir, 'SKILL.md'), this.renderSkillMd(slug, title, desc, body), 'utf8');
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    entry.title = title; entry.desc = desc;
+    if (Array.isArray(patch.tags) && patch.tags.length) entry.tags = patch.tags.filter((t) => typeof t === 'string').slice(0, 8);
+    const usage = this.readUsage();
+    const nowIso = new Date().toISOString();
+    const u = usage[slug] ?? newUsage(slug, title, patch.by || 'agent', entry.state, nowIso);
+    u.patch_count += 1; u.last_patched_at = nowIso; u.title = title;
+    usage[slug] = u;
+    this.writeJson(this.indexPath()!, index);
+    this.writeJson(this.usagePath()!, usage);
+    return { ok: true };
+  }
+
+  /** Cheap, no-LLM duplicate detector for the curator's fast-path: cluster non-archived
+   *  skills that share a tag AND have token-overlapping titles. Returns merge stubs the
+   *  caller hands to applyCuratorPlan (umbrella = the most-used member; body concatenates
+   *  the members so no procedure is lost). Conservative: only obvious pairs. */
+  findDuplicateMerges(): CuratorPlan {
+    if (!this.enabled()) return { merge: [], archive: [] };
+    const index = this.readIndex().filter((e) => e.state !== 'archived');
+    const usage = this.readUsage();
+    const merge: NonNullable<CuratorPlan['merge']> = [];
+    const claimed = new Set<string>();
+    for (let i = 0; i < index.length; i++) {
+      const a = index[i];
+      if (claimed.has(a.slug)) continue;
+      const cluster = [a];
+      for (let j = i + 1; j < index.length; j++) {
+        const b = index[j];
+        if (claimed.has(b.slug)) continue;
+        const sharedTag = (a.tags ?? []).some((t) => (b.tags ?? []).includes(t));
+        if (sharedTag && this.titleOverlap(a.title, b.title) >= 2) cluster.push(b);
+      }
+      if (cluster.length < 2) continue;
+      // Umbrella = most-used member (stable order tie-break by slug).
+      cluster.sort((x, y) => (usage[y.slug]?.use_count ?? 0) - (usage[x.slug]?.use_count ?? 0) || x.slug.localeCompare(y.slug));
+      const umbrella = cluster[0];
+      const body = [`# ${umbrella.title}`, '', ...cluster.map((c) => `## ${c.title}\n\n${this.readSkillBody(c.slug).replace(/^---\n[\s\S]*?\n---\n?/, '').trim()}`)].join('\n\n');
+      merge.push({ umbrella: umbrella.slug, title: umbrella.title, description: umbrella.desc, absorb: cluster.map((c) => c.slug), body });
+      for (const c of cluster) claimed.add(c.slug);
+    }
+    return { merge, archive: [] };
+  }
+
+  /** Count of shared content tokens between two titles (≥3 chars, stop-worded). */
+  private titleOverlap(a: string, b: string): number {
+    const ta = new Set(this.tokenize(a));
+    let n = 0;
+    for (const t of this.tokenize(b)) if (ta.has(t)) n++;
+    return n;
   }
 
   // — read helpers (for IPC / curator prompt) —
 
   /** The active (non-archived) library, for IPC/UI and the curator's prompt. */
   listSkills(): SkillIndexEntry[] {
-    return this.readIndex().filter((e) => e.state !== 'archived');
+    return this.readIndex().filter((e) => e.state !== 'archived' && !e.path);
   }
   status(): { enabled: boolean; total: number; active: number; provisional: number; stale: number; archived: number } {
     const idx = this.readIndex();
@@ -448,7 +853,9 @@ export class KnowledgeManager {
         created_at: u?.created_at ?? '',
         last_used_at: u?.last_used_at ?? null,
         use_count: u?.use_count ?? 0,
-        inject_count: u?.inject_count ?? 0
+        inject_count: u?.inject_count ?? 0,
+        view_count: u?.view_count ?? 0,
+        patch_count: u?.patch_count ?? 0
       };
     });
     const seen = new Set(rows.map((r) => r.slug));
@@ -465,7 +872,7 @@ export class KnowledgeManager {
         rows.push({
           slug, title, desc: '', tags: [], state: 'active',
           created_by: 'agent', pinned: false, created_at: '', last_used_at: null,
-          use_count: 0, inject_count: 0
+          use_count: 0, inject_count: 0, view_count: 0, patch_count: 0
         });
       }
     }
@@ -523,14 +930,12 @@ export class KnowledgeManager {
     else index.push({ slug, title, desc, tags, state: 'active' });
     const prev = usage[slug];
     usage[slug] = {
+      ...newUsage(slug, title, 'human', 'active', prev?.created_at ?? nowIso),
+      ...(prev ? fillUsage(prev) : {}),
       slug, title,
-      created_at: prev?.created_at ?? nowIso,
       last_used_at: nowIso, // a human just touched it → fresh, won't go stale next cycle
-      use_count: prev?.use_count ?? 0,
-      inject_count: prev?.inject_count ?? 0,
       state: 'active',
       created_by: 'human', // user-curated → protected from the curator
-      pinned: prev?.pinned ?? false
     };
     this.writeJson(this.indexPath()!, index);
     this.writeJson(this.usagePath()!, usage);
@@ -644,8 +1049,9 @@ export class KnowledgeManager {
   private bumpInject(slugs: string[]): void {
     try {
       const usage = this.readUsage();
+      const nowIso = new Date().toISOString();
       let changed = false;
-      for (const s of slugs) { if (usage[s]) { usage[s].inject_count += 1; changed = true; } }
+      for (const s of slugs) { if (usage[s]) { usage[s].inject_count += 1; usage[s].last_injected_at = nowIso; changed = true; } }
       if (changed) this.writeJson(this.usagePath()!, usage);
     } catch { /* telemetry is best-effort */ }
   }
@@ -734,8 +1140,16 @@ export class KnowledgeManager {
   private readUsage(): Record<string, SkillUsage> {
     const p = this.usagePath();
     if (!p) return {};
-    try { const v = JSON.parse(readFileSync(p, 'utf8')); return v && typeof v === 'object' ? v as Record<string, SkillUsage> : {}; }
-    catch { return {}; }
+    try {
+      const v = JSON.parse(readFileSync(p, 'utf8'));
+      if (!v || typeof v !== 'object') return {};
+      // Backfill any record written before the telemetry fields existed.
+      const out: Record<string, SkillUsage> = {};
+      for (const [slug, rec] of Object.entries(v as Record<string, Partial<SkillUsage>>)) {
+        out[slug] = fillUsage({ ...rec, slug });
+      }
+      return out;
+    } catch { return {}; }
   }
   private writeJson(p: string, data: unknown): void {
     const tmp = `${p}.tmp-${shortRand()}`;

@@ -46,6 +46,9 @@ export class Curator {
 
   start(): void {
     if (this.intervalTimer || !this.enabled()) return;
+    // Restore the consolidation cadence across restarts so a fresh launch isn't always
+    // "due" (and so the 6h throttle is actually meaningful between sessions).
+    this.lastConsolidateAt = this.knowledge.loadCuratorTimestamp();
     const mins = Math.max(5, this.getConfig().curatorIntervalMinutes ?? 60);
     this.intervalTimer = setInterval(() => { void this.runCycle('interval'); }, mins * 60_000);
     this.intervalTimer.unref();
@@ -72,8 +75,16 @@ export class Curator {
     this.running = true;
     try {
       const promoted = this.knowledge.promoteProposals();
+      const patched = this.knowledge.applyStagedPatches();
       const aged = this.knowledge.runLifecycle();
-      if (promoted || aged) console.log(`[curator] ${trigger}: promoted ${promoted} proposal(s), aged ${aged} skill(s)`);
+      // Cheap, no-LLM dedup fast-path EVERY cycle: merge obvious overlaps (shared tag +
+      // overlapping titles) without waiting for the 6-skill floor or a long-lived session.
+      let deduped = 0;
+      const dupPlan = this.knowledge.findDuplicateMerges();
+      if (dupPlan.merge && dupPlan.merge.length) deduped = this.knowledge.applyCuratorPlan(dupPlan, 'dedup');
+      if (promoted || patched || aged || deduped) {
+        console.log(`[curator] ${trigger}: promoted ${promoted}, patched ${patched}, aged ${aged}, deduped ${deduped}`);
+      }
 
       // LLM consolidation — periodic, budget-gated, only once the library is big enough.
       const now = Date.now();
@@ -81,6 +92,7 @@ export class Curator {
       const due = now - this.lastConsolidateAt > CONSOLIDATE_EVERY_MS;
       if (due && skills.length >= MIN_SKILLS_TO_CONSOLIDATE && this.withinBudget()) {
         this.lastConsolidateAt = now;
+        this.knowledge.saveCuratorTimestamp(now); // persist so the throttle survives restarts
         const plan = await this.runConsolidationLLM(skills);
         if (plan) {
           const ops = this.knowledge.applyCuratorPlan(plan);
