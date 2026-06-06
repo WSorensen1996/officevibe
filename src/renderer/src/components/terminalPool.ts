@@ -47,6 +47,12 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
   host.style.height = '100%';
 
   const term = new Terminal({
+    // Match the pty's spawn geometry (PtyManager spawns at 100×30). Before a view
+    // first attaches and fits this terminal, the default 80×24 would wrap content
+    // differently than the pty formats it — which corrupts headless buffer reads
+    // (capturePrompt.readPtyTail) for background agents that were never opened.
+    cols: 100,
+    rows: 30,
     theme,
     fontFamily: 'VT323, monospace',
     fontSize,

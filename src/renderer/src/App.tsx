@@ -48,8 +48,13 @@ export function App() {
   const setSidebarWidth = useStore(s => s.setSidebarWidth);
   const leftTab = useStore(s => s.leftTab);
   const setLeftTab = useStore(s => s.setLeftTab);
+  const select = useStore(s => s.select);
   const openTaskId = useStore(s => s.openTaskId);
   const browserActive = useStore(s => s.browserActive);
+  // Any agent blocked on a prompt lights the Messages-tab badge (the request lives
+  // in that agent's messages). Clicking the tab jumps to the blocked agent so it's
+  // answerable even when a different agent is selected — covers "any agent blocks".
+  const blockedAgent = agents.find(a => a.status === 'blocked');
 
   const [config, setConfig] = useState<HarnessConfig | null>(null);
   const [quitWarn, setQuitWarn] = useState<{ ptyCount: number } | null>(null);
@@ -202,7 +207,18 @@ export function App() {
           </div>
           {/* Tab bar: office + the selected agent's workspace + the shared browser
               + a transient TASK tab when a card's full view is open. */}
-          <LeftTabs current={leftTab} onChange={setLeftTab} browserActive={browserActive} accent={agent?.accent} hasOpenTask={!!openTaskId} />
+          <LeftTabs
+            current={leftTab}
+            onChange={(tab) => {
+              // Jump to the blocked agent's messages when opening the tab via its badge.
+              if (tab === 'messages' && blockedAgent && blockedAgent.id !== agent?.id) select(blockedAgent.id);
+              setLeftTab(tab);
+            }}
+            browserActive={browserActive}
+            messagesNeedsYou={!!blockedAgent}
+            accent={agent?.accent}
+            hasOpenTask={!!openTaskId}
+          />
 
           <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
             {/* Office tab — kept mounted (display toggle) so Pixi keeps its avatars. */}

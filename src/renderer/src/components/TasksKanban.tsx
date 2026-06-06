@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { PixelBadge } from './PixelBadge';
@@ -18,7 +18,9 @@ import {
   intervalLabel,
   toLocalInput,
   shortWhen,
-  shortId
+  shortId,
+  canDispatchTask,
+  isTaskUnread
 } from './tasks/taskShared';
 
 export type { ProjectTask, TaskUpdate } from './tasks/taskShared';
@@ -67,7 +69,7 @@ export function TasksKanban() {
         <PixelButton
           variant="primary"
           size="sm"
-          onClick={() => openTask(NEW_TASK_ID, 'edit')}
+          onClick={() => openTask(NEW_TASK_ID)}
           style={{ marginLeft: 'auto' }}
         >
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
@@ -82,6 +84,7 @@ export function TasksKanban() {
       }}>
         {COLUMNS.map((col) => {
           const cards = active.filter((t) => t.status === col.key);
+          const unread = cards.filter(isTaskUnread).length;
           return (
             <div key={col.key} style={{
               flex: '1 1 0', minWidth: 170, display: 'flex', flexDirection: 'column',
@@ -93,7 +96,18 @@ export function TasksKanban() {
                 fontFamily: 'var(--cth-font-display)', fontSize: 9, color: 'var(--cth-ink-900)'
               }}>
                 {col.label}
-                <span style={{ marginLeft: 'auto', fontSize: 11, fontFamily: 'var(--cth-font-ui)' }}>{cards.length}</span>
+                {unread > 0 && (
+                  <span
+                    title={`${unread} unread`}
+                    style={{
+                      marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      minWidth: 14, height: 14, padding: '0 4px',
+                      background: 'var(--cth-coral)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
+                      fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-900)'
+                    }}
+                  >{unread}</span>
+                )}
+                <span style={{ marginLeft: unread > 0 ? 4 : 'auto', fontSize: 11, fontFamily: 'var(--cth-font-ui)' }}>{cards.length}</span>
               </div>
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {cards.length === 0 && (
@@ -108,8 +122,7 @@ export function TasksKanban() {
                     onMove={(s) => moveTask(t.id, s)}
                     onDispatch={() => dispatchTask(t)}
                     onArchive={() => archiveTask(t.id)}
-                    onEdit={() => openTask(t.id, 'edit')}
-                    onOpen={() => openTask(t.id, 'view')}
+                    onEdit={() => openTask(t.id)}
                   />
                 ))}
               </div>
@@ -203,7 +216,7 @@ function ArchivedTaskRow({ task, onRestore, onDelete }: {
 
 // ─── Card ────────────────────────────────────────────────────────────────────
 
-function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, onEdit, onOpen }: {
+function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, onEdit }: {
   task: ProjectTask;
   assigneeName?: string;
   mission?: ScheduledMission;
@@ -211,17 +224,18 @@ function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, 
   onDispatch: () => void;
   onArchive: () => void;
   onEdit: () => void;
-  onOpen: () => void;
 }) {
   const pr = Math.max(1, Math.min(5, task.priority));
   // Dispatch sends the card to its assignee's inbox; once a task is moving
-  // (doing) or finished (done) it's effectively already dispatched, so only
-  // offer the button for not-yet-started (todo) or re-nudgeable (blocked) cards.
-  const canDispatch = task.status === 'todo' || task.status === 'blocked';
+  // (doing) or finished (done) it's effectively already dispatched — and once a
+  // todo/blocked card has been dispatched it hides until its status next changes,
+  // so it can't be dispatched twice (see canDispatchTask).
+  const canDispatch = canDispatchTask(task);
   const [showHistory, setShowHistory] = useState(false);
   const updates = task.updates ?? [];
   const last = updates.length ? updates[updates.length - 1] : undefined;
   const hasHistory = updates.length > 1;
+  const unread = isTaskUnread(task);
   // A human moved the card after the agent's last status note (e.g. reopened a
   // DONE card back to TODO): mute the now-stale TLDR so the card reads as its
   // new column instead of looking unchanged. History stays in the +n toggle.
@@ -248,6 +262,16 @@ function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, 
           flex: 1, minWidth: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 13,
           lineHeight: '16px', color: 'var(--cth-ink-900)'
         }}>{task.title}</span>
+        {unread && (
+          <span
+            title="New activity since you last opened this"
+            style={{
+              flexShrink: 0, marginTop: 1, padding: '1px 4px 0',
+              background: 'var(--cth-coral)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
+              fontFamily: 'var(--cth-font-display)', fontSize: 7, color: 'var(--cth-ink-900)'
+            }}
+          >NEW</span>
+        )}
       </div>
 
       {/* Latest agent TLDR — its own click toggles the history (never edits). */}
@@ -341,16 +365,6 @@ function TaskCard({ task, assigneeName, mission, onMove, onDispatch, onArchive, 
           </PixelButton>
         )}
         <button
-          onClick={onOpen}
-          title="Open full card"
-          style={{
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-            padding: '3px 7px 2px', border: 'none', cursor: 'pointer',
-            background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
-            color: 'var(--cth-ink-900)'
-          }}
-        ><Icon name="expand" /></button>
-        <button
           onClick={onArchive}
           title="Archive task (file it away — restorable from the ARCHIVED section)"
           style={{
@@ -383,11 +397,14 @@ export function PriorityDots({ level }: { level: number }) {
 
 // ─── Add-task form ─────────────────────────────────────────────────────────--
 
-export function AddTaskForm({ agents, existing, initial, initialMission, onCancel, onSubmit, onCreateAndDispatch, onDelete, onArchive }: {
+export function AddTaskForm({ agents, existing, initial, seed, initialMission, onCancel, onSubmit, onCreateAndDispatch, onDelete, onArchive, onDispatch }: {
   agents: { id: string; name: string; isGod?: boolean }[];
   existing: ProjectTask[];
   /** When set, the form edits this task instead of creating a new one. */
   initial?: ProjectTask;
+  /** Prefill for a NEW task (create mode only — never sets `editing`). Used by
+   *  "new task from selection" to seed the description + a back-reference dep. */
+  seed?: { description?: string; dependsOn?: string[] };
   /** The task's current schedule, if any — seeds the SCHEDULE controls. */
   initialMission?: ScheduledMission;
   onCancel: () => void;
@@ -397,15 +414,23 @@ export function AddTaskForm({ agents, existing, initial, initialMission, onCance
   onDelete?: () => void;
   /** Archive the task being edited (reversible; existing tasks only). */
   onArchive?: () => void;
+  /** Dispatch the task to its assignee now (existing, not-yet-running tasks). */
+  onDispatch?: () => void;
 }) {
   const editing = !!initial;
   const [title, setTitle] = useState(initial?.title ?? '');
-  const [description, setDescription] = useState(initial?.description ?? '');
+  const [description, setDescription] = useState(initial?.description ?? seed?.description ?? '');
   const [assignee, setAssignee] = useState(initial?.assignee ?? '');
   const [priority, setPriority] = useState(initial?.priority ?? 3);
-  const [deps, setDeps] = useState<string[]>(initial?.dependsOn ?? []);
+  const [deps, setDeps] = useState<string[]>(initial?.dependsOn ?? seed?.dependsOn ?? []);
   const [status, setStatus] = useState<Status>(initial?.status ?? 'todo');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Dispatch is offered only for not-yet-running tasks (mirrors the board card),
+  // and hidden once an existing card has been dispatched until its status next
+  // changes. Gate on the form's live status + the persisted dispatch stamps.
+  const canDispatch = initial
+    ? canDispatchTask({ ...initial, status })
+    : status === 'todo' || status === 'blocked';
   // Schedule controls. A one-shot that already fired seeds as 'none' (it's done,
   // not still-pending); the user can pick a fresh time to re-arm it.
   const firedOnce = initialMission?.mode === 'once' && !!initialMission.lastFiredAt;
@@ -424,6 +449,22 @@ export function AddTaskForm({ agents, existing, initial, initialMission, onCance
   const [enriching, setEnriching] = useState(false);
   const [preEnrich, setPreEnrich] = useState<string | null>(null);
   const [enrichError, setEnrichError] = useState<string | null>(null);
+
+  // Programmatic setDescription() (enrich/undo/dictation) updates the controlled
+  // textarea's value, but the new text isn't *painted* until the user interacts:
+  // the Pixi WebGL canvas (scene/office) runs a continuous ticker on its own
+  // compositor layer, and Chromium/Electron doesn't flush the textarea's layer
+  // after a non-input-driven update. Focusing on the next frame (plus a reflow
+  // read) forces that layer to repaint so the text shows immediately.
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const nudgeRepaint = useCallback(() => {
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();           // primary: invalidates + repaints this layer
+      void el.offsetHeight; // backup: forces a synchronous reflow
+    });
+  }, []);
 
   // Deliberately omit `updates`/`statusUpdatedAt` — the form never carries
   // agent-owned data; the main-process writeTasks merge restores them from disk.
@@ -473,6 +514,9 @@ export function AddTaskForm({ agents, existing, initial, initialMission, onCance
       if (res.ok && res.prompt) {
         setPreEnrich(description); // stash current text for undo
         setDescription(res.prompt);
+        nudgeRepaint(); // force the textarea layer to repaint (see nudgeRepaint)
+        // Soft note: enrich still ran, just without team memories as context.
+        setEnrichError(res.memoryUnavailable ? 'enriched without team memories (memory unavailable)' : null);
       } else {
         setEnrichError(res.error || 'enrich failed');
       }
@@ -481,14 +525,15 @@ export function AddTaskForm({ agents, existing, initial, initialMission, onCance
     } finally {
       setEnriching(false);
     }
-  }, [enriching, title, description]);
+  }, [enriching, title, description, nudgeRepaint]);
 
   const undoEnrich = useCallback(() => {
     if (preEnrich === null) return;
     setDescription(preEnrich);
+    nudgeRepaint(); // same repaint quirk as enrich — show the restored text now
     setPreEnrich(null);
     setEnrichError(null);
-  }, [preEnrich]);
+  }, [preEnrich, nudgeRepaint]);
 
   const toggleDep = (id: string) => {
     setDeps((d) => (d.includes(id) ? d.filter((x) => x !== id) : [...d, id]));
@@ -507,22 +552,23 @@ export function AddTaskForm({ agents, existing, initial, initialMission, onCance
         />
         <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
           <textarea
+            ref={textareaRef}
             value={description}
             // Manually editing the enriched text retires the undo — restoring an
             // ambiguous "previous" version would be surprising after hand-edits.
             onChange={(e) => { setDescription(e.target.value); if (preEnrich !== null) setPreEnrich(null); }}
-            rows={2}
+            rows={5}
             placeholder="Description / context (optional)"
-            style={{ ...inputStyle, flex: 1, resize: 'none', fontFamily: 'var(--cth-font-mono)' }}
+            style={{ ...inputStyle, flex: 1, resize: 'vertical', fontFamily: 'var(--cth-font-mono)' }}
           />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'stretch', flexShrink: 0 }}>
-            <MicButton onTranscript={(t) => setDescription((p) => (p ? `${p} ${t}` : t))} />
+            <MicButton onTranscript={(t) => { setDescription((p) => (p ? `${p} ${t}` : t)); nudgeRepaint(); }} />
             <button
               type="button"
               onClick={enrich}
               disabled={enriching || (!title.trim() && !description.trim())}
               title={enriching
-                ? 'Enriching — reading the repo read-only to build a concrete task description (can take a bit)'
+                ? 'Enriching — rewriting from team memories into a concrete task description (fast)'
                 : 'Enrich — rewrite this into a concrete, self-contained task description'}
               style={{
                 height: 30, padding: '0 8px',
@@ -658,6 +704,13 @@ export function AddTaskForm({ agents, existing, initial, initialMission, onCance
               <Icon name="check" /> {editing ? 'save' : 'create'}
             </span>
           </PixelButton>
+          {editing && onDispatch && canDispatch && (
+            <PixelButton variant="primary" size="sm" onClick={onDispatch}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                <Icon name="arrow-right" /> dispatch
+              </span>
+            </PixelButton>
+          )}
           {!editing && onCreateAndDispatch && (
             <PixelButton
               variant="primary"

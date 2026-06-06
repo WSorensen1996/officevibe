@@ -7,7 +7,8 @@ import {
   type ScheduleSpec,
   type Status,
   POLL_MS,
-  parseTasks
+  parseTasks,
+  isTaskUnread
 } from '@/components/tasks/taskShared';
 
 /**
@@ -40,6 +41,7 @@ interface TasksStore {
   moveTask: (id: string, status: Status) => void;
   archiveTask: (id: string) => void;
   unarchiveTask: (id: string) => void;
+  markTaskRead: (id: string) => void;
   dispatchTask: (t: ProjectTask) => Promise<void>;
 }
 
@@ -139,6 +141,19 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     get().persist(get().tasks.map((t) => (t.id === id ? { ...t, archived: false } : t)));
   },
 
+  // Stamp a card as read when the human opens its full view. Sets viewedAt to the
+  // newest update's ts (not `now`) so an agent update landing between open and
+  // persist still reads as unread on the next poll — it genuinely IS newer. The
+  // guard makes this a no-op when already read, so the open-effect can't loop.
+  markTaskRead: (id) => {
+    const { tasks, persist } = get();
+    const task = tasks.find((t) => t.id === id);
+    if (!task || !isTaskUnread(task)) return;
+    const ups = task.updates ?? [];
+    const newest = ups.length ? ups[ups.length - 1].ts : new Date().toISOString();
+    persist(tasks.map((t) => (t.id === id ? { ...t, viewedAt: newest } : t)));
+  },
+
   // Send a card straight to its assignee's inbox (Michael if unassigned). Embeds
   // [task:id] so the worker can post status updates back onto THIS card, and
   // flips the floor started so the inbox wake-nudge loop delivers it even when
@@ -157,6 +172,12 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     if (!res.ok) {
       setMsg(`dispatch failed: ${res.error ?? '?'}`);
     } else {
+      // Stamp the card so the dispatch button hides; persisted, so it survives
+      // reloads until the task's status next changes (re-nudgeable when blocked).
+      // Map over the live store array, not the captured `t`, to avoid clobbering
+      // a concurrent edit.
+      await get().persist(get().tasks.map((x) =>
+        (x.id === t.id ? { ...x, dispatchedAt: new Date().toISOString() } : x)));
       useStore.getState().startFloor();
       const agents = useStore.getState().agents;
       const name = to === 'god' ? 'Michael' : (agents.find((a) => a.id === to)?.name ?? to);
@@ -224,6 +245,7 @@ export function useTasks() {
     moveTask: s.moveTask,
     archiveTask: s.archiveTask,
     unarchiveTask: s.unarchiveTask,
+    markTaskRead: s.markTaskRead,
     dispatchTask: s.dispatchTask
   };
 }

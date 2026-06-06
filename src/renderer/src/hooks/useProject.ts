@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { useStore, type Agent, type StationKind, type ToolKind } from '@/store/store';
 import { buildSpawnCommand, type HarnessConfig } from '@/store/config';
+import { submitToPty } from './ptyInput';
+import { permissionCard } from './permissionCard';
 
 const GOD_ID = 'god';
 const GOD_PTY = `pty-${GOD_ID}`;
@@ -22,21 +24,6 @@ const INITIAL_GOD_PROMPT = [
   '3. Run `mempalace wake-up` for a memory digest if the CLI is available.',
   'Then begin orchestrating: triage requests, delegate work to the team, and keep everyone unblocked. You are fully autonomous — there is no approval queue, so handle tool-permission prompts in this session yourself (the human can approve them remotely from their phone).'
 ].join('\n');
-
-/**
- * Type a line into an agent's Claude Code TUI and actually submit it.
- *
- * Writing the text and the carriage return in a single chunk makes the TUI
- * treat the whole thing as a paste, so the "\r" lands as a newline inside the
- * input box instead of submitting — the command just sits there as text. We
- * send the text first, then the Enter as a separate keystroke a tick later so
- * the prompt is registered and executed. Idle autonomous agents thus act on a
- * dispatched instruction on their own. */
-async function submitToPty(ptyId: string, text: string): Promise<void> {
-  await window.cth.writePty(ptyId, text);
-  await new Promise((r) => setTimeout(r, 140));
-  await window.cth.writePty(ptyId, '\r');
-}
 
 /** Wrap a user message as an enrich task for the assistant. The assistant's
  *  system prompt has the full instructions; this just frames the one task. */
@@ -84,10 +71,13 @@ export function useProject(config: HarnessConfig | null): void {
   // the spawnPty call is otherwise racy).
   const godSpawning = useRef(false);
   const assistantSpawning = useRef(false);
-  // Debounce timer for the Browser-tab "is-browsing" badge: each mcp__browser__*
-  // tool resets it, so the badge stays lit through a browsing burst and fades a
-  // few seconds after the last action.
-  const browserIdle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Per-agent debounce timers for the Browser-tab "is-browsing" cue: each agent's
+  // mcp__browser__* tool resets its own timer, so the cue stays lit through that
+  // agent's browsing burst and fades a few seconds after its last action.
+  const browserIdle = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  // Short debounce for auto-following the acting agent onto the browser pane, so
+  // a burst of alternating agents doesn't thrash the on-screen view.
+  const autoFollow = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Reactive so the assistant bootstrap (effect #1b) re-runs once Michael is ready.
   const godStatus = useStore((s) => s.godStatus);
   // Display label for the active project (shown under each agent, e.g. "Michael · Acme").
@@ -111,7 +101,7 @@ export function useProject(config: HarnessConfig | null): void {
       godSpawning.current = true;
       useStore.getState().removeAgent(GOD_ID); // clear any stale restored entry
 
-      const command = buildSpawnCommand(config, config.defaultModel);
+      const command = buildSpawnCommand(config, config.defaultModel, config.defaultEffort);
       const [exe, ...args] = command.trim().split(/\s+/);
       const res = await window.cth.spawnPty({
         id: GOD_PTY,
@@ -140,6 +130,7 @@ export function useProject(config: HarnessConfig | null): void {
         ptyId: GOD_PTY,
         command: command.trim(),
         model: config.defaultModel,
+        effort: config.defaultEffort,
         isGod: true,
         recentTextTs: Date.now()
       };
@@ -190,7 +181,7 @@ export function useProject(config: HarnessConfig | null): void {
       // which is unset by default → the subscription's default model (no --model
       // flag). Previously this forced claude-sonnet-4-6[1m]; pinning the premium
       // 1M-context variant risked costs outside a user's plan.
-      const command = buildSpawnCommand(config, config.defaultModel);
+      const command = buildSpawnCommand(config, config.defaultModel, config.defaultEffort);
       const [exe, ...args] = command.trim().split(/\s+/);
       const res = await window.cth.spawnPty({
         id: ASSISTANT_PTY,
@@ -218,6 +209,7 @@ export function useProject(config: HarnessConfig | null): void {
         ptyId: ASSISTANT_PTY,
         command: command.trim(),
         model: config.defaultModel,
+        effort: config.defaultEffort,
         isAssistant: true,
         recentTextTs: Date.now()
       };
@@ -232,7 +224,7 @@ export function useProject(config: HarnessConfig | null): void {
 
   // 2) Drive avatars from real hook events emitted by each agent's shim.
   useEffect(() => {
-    return window.cth.onProjectHookEvent((e) => {
+    const off = window.cth.onProjectHookEvent((e) => {
       if (!e.agentId) return;
       const { updateAgent, agents } = useStore.getState();
       const self = agents.find((a) => a.id === e.agentId);
@@ -240,61 +232,119 @@ export function useProject(config: HarnessConfig | null): void {
       // Hook events are the authoritative status source for real agents (the
       // pty-stream parser only refines the on-floor action/station).
       if (e.event === 'PreToolUse' && e.tool) {
-        // The god's browser MCP tools (mcp__browser__*) drive the embedded pane —
+        // Any agent's browser MCP tools (mcp__browser__*) drive its own view —
         // send the avatar to the web portal station while it browses.
         const isBrowser = e.tool.startsWith('mcp__browser__');
         const m = isBrowser
           ? { station: 'web' as StationKind, carry: 'WebFetch' as ToolKind }
           : (TOOL_STATION[e.tool] ?? { station: 'desk' as StationKind });
         const action = isBrowser ? `browsing (${e.tool.replace('mcp__browser__', '')})` : `using ${e.tool}`;
-        updateAgent(e.agentId, { status: 'working', currentStation: m.station, carrying: m.carry, action });
+        // `browsing` is true ONLY for a live browser session (mcp__browser__*), not a
+        // text WebSearch/WebFetch — both share the 'web' station, but only the former
+        // drives the Browser pane, so only it should ping the user to the Browser tab.
+        updateAgent(e.agentId, { status: 'working', currentStation: m.station, carrying: m.carry, action, browsing: isBrowser, blockReason: undefined });
         useStore.getState().bumpToolCount(e.agentId); // usage proxy for the command center
         if (isBrowser) {
-          // Light the Browser-tab badge and (re)arm the fade so it clears a few
-          // seconds after Michael's last browser action.
+          // Light the Browser-tab badge + this agent's browse cue, and (re)arm a
+          // PER-AGENT fade so a second agent browsing doesn't leave the first one's
+          // `browsing` flag stuck on. The global badge clears only once NO agent is
+          // mid-browse.
           useStore.getState().setBrowserActive(true);
-          if (browserIdle.current) clearTimeout(browserIdle.current);
-          browserIdle.current = setTimeout(() => useStore.getState().setBrowserActive(false), 4000);
+          const browsingAgentId = e.agentId;
+          if (browserIdle.current[browsingAgentId]) clearTimeout(browserIdle.current[browsingAgentId]);
+          browserIdle.current[browsingAgentId] = setTimeout(() => {
+            delete browserIdle.current[browsingAgentId];
+            useStore.getState().updateAgent(browsingAgentId, { browsing: false });
+            if (Object.keys(browserIdle.current).length === 0) useStore.getState().setBrowserActive(false);
+          }, 4000);
+          // Auto-follow: bring the acting agent's browser on stage so the user
+          // watches whoever just acted — UNLESS they've pinned a tab. Debounced so
+          // a burst of alternating agents doesn't thrash the on-screen view. The
+          // pin is re-checked at FIRE time so a pin set during the 250ms window wins.
+          if (autoFollow.current) clearTimeout(autoFollow.current);
+          autoFollow.current = setTimeout(() => {
+            if (!useStore.getState().browserPinnedAgentId) window.cth.browser?.stage(browsingAgentId);
+          }, 250);
         }
       } else if (e.event === 'PostToolUse' || e.event === 'UserPromptSubmit') {
         // A turn is in progress (prompt submitted / tool just finished) — keep
         // it working so it doesn't flicker idle between tool calls.
-        updateAgent(e.agentId, { status: 'working' });
+        updateAgent(e.agentId, { status: 'working', blockReason: undefined });
       } else if (e.event === 'Stop' || e.event === 'SubagentStop') {
         // A blocked Stop means the agent is being re-engaged to process its
         // inbox — it's NOT idle, so keep it working until it genuinely stops.
         if (e.blocked) {
-          updateAgent(e.agentId, { status: 'working', action: 'reading inbox', carrying: undefined });
+          updateAgent(e.agentId, { status: 'working', action: 'reading inbox', carrying: undefined, blockReason: undefined });
         } else {
-          updateAgent(e.agentId, { status: 'idle', action: 'idle', carrying: undefined });
+          updateAgent(e.agentId, { status: 'idle', action: 'idle', carrying: undefined, browsing: false, blockReason: undefined });
         }
       } else if (e.event === 'Notification') {
-        // Claude Code fires Notification for two very different situations:
-        //   1. it genuinely needs the human (a permission / approval prompt), or
-        //   2. the prompt has merely gone idle ("Claude is waiting for your
-        //      input") — i.e. the agent answered and has nothing queued.
-        // Only (1) is a real "needs you". Treating (2) as blocked made Michael
-        // march to the door with a red "!" right after finishing, so detect the
-        // idle case and let him linger on the floor instead.
-        const msg = (e.message ?? '').toLowerCase();
-        const idleWaiting = !msg
-          || msg.includes('waiting for your input')
-          || msg.includes('is idle')
-          || msg.includes('waiting for input');
-        const needsHuman = msg.includes('permission')
-          || msg.includes('approve')
-          || msg.includes('confirm')
-          || msg.includes('needs your');
-        if (needsHuman && !idleWaiting) {
-          // Only the god agent escalates to the human; sub-agents are autonomous
-          // and read as "waiting" (parked on god, not on you).
-          updateAgent(e.agentId, { status: self.isGod ? 'blocked' : 'waiting' });
+        // Tool-permission prompts are handled by the PreToolUse hook gate (effect 2b
+        // → permissionCard), not here. A Notification now means the agent ended its
+        // turn waiting on the human: either it asked a free-text question, or it just
+        // went idle. We no longer scrape the terminal — if the agent's last message
+        // reads as a question, surface a reply card; otherwise settle idle. Never
+        // clobber an active block (e.g. a pending permission card).
+        if (self.status === 'blocked') return;
+        const last = (self.recentAssistantText ?? '').trim();
+        if (last.endsWith('?')) {
+          updateAgent(e.agentId, {
+            status: 'blocked', action: 'waiting on you', description: 'waiting on you',
+            currentStation: 'mailbox', carrying: undefined, browsing: false,
+            blockReason: {
+              summary: last.length > 140 ? last.slice(0, 139) + '…' : last,
+              detail: 'Type your answer below.',
+              promptKind: 'text',
+              actions: []
+            }
+          });
         } else {
-          // Idle notification — responded, nothing to do. Linger, don't flag.
-          updateAgent(e.agentId, { status: 'idle', action: 'idle', carrying: undefined });
+          updateAgent(e.agentId, { status: 'idle', action: 'idle', carrying: undefined, blockReason: undefined });
         }
       }
     });
+    const idleTimers = browserIdle.current;
+    return () => {
+      off();
+      // Clear pending browser debounce timers so a stale callback can't fire after
+      // unmount (e.g. a renderer reload).
+      if (autoFollow.current) clearTimeout(autoFollow.current);
+      Object.values(idleTimers).forEach(clearTimeout);
+    };
+  }, []);
+
+  // 2b) Permission gate: an agent's PreToolUse hook is blocked awaiting approval.
+  //     Main forwards the exact tool + structured input, so we render a precise card
+  //     (no scraping) whose Approve/Deny buttons resolve the hook via respondPermission.
+  useEffect(() => {
+    const offReq = window.cth.onPermissionRequest((req) => {
+      if (!req.agentId) return;
+      const { updateAgent, agents } = useStore.getState();
+      if (!agents.some((a) => a.id === req.agentId)) return;
+      updateAgent(req.agentId, {
+        status: 'blocked', action: 'waiting on you', description: 'waiting on you',
+        currentStation: 'mailbox', carrying: undefined, browsing: false,
+        blockReason: permissionCard(req)
+      });
+    });
+    const offResolved = window.cth.onPermissionResolved(({ requestId, timedOut }) => {
+      const { updateAgent, agents } = useStore.getState();
+      const target = agents.find((a) => a.blockReason?.requestId === requestId);
+      if (!target) return;
+      if (timedOut) {
+        updateAgent(target.id, {
+          status: 'blocked', action: 'waiting on you', currentStation: 'mailbox',
+          blockReason: {
+            summary: 'Approval timed out',
+            detail: 'Answer the prompt in the agent’s terminal, or reply below.',
+            promptKind: 'text', actions: []
+          }
+        });
+      } else {
+        updateAgent(target.id, { status: 'working', action: 'working', blockReason: undefined });
+      }
+    });
+    return () => { offReq(); offResolved(); };
   }, []);
 
   // 3) Wake idle agents holding unread inbox messages. The assistant is

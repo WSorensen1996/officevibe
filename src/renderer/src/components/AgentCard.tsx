@@ -5,7 +5,7 @@ import { SpritePortrait } from './SpritePortrait';
 import { Select } from './Select';
 import { AccentColorName } from '@/design/tokens';
 import { OfficeCharacterName } from '@/scene/office/cast';
-import { AGENT_MODELS } from '@/store/config';
+import { AGENT_MODELS, AGENT_EFFORTS, type EffortLevel } from '@/store/config';
 
 export interface AgentCardProps {
   name: string;
@@ -23,6 +23,8 @@ export interface AgentCardProps {
   onClick?: () => void;
   /** The agent's current model id (drives the picker's selected value). */
   model?: string;
+  /** The agent's current effort level (drives the effort picker's selected value). */
+  effort?: EffortLevel;
   /** Tool-call tally shown beside the picker. */
   toolCalls?: number;
   /** True while this agent's pty is being killed/respawned. */
@@ -31,13 +33,15 @@ export interface AgentCardProps {
   canRestart?: boolean;
   /** Pick a model → restart the agent under it. Presence of this enables the controls row. */
   onPickModel?: (model: string | undefined) => void;
-  /** Restart the agent under its current model. */
+  /** Pick an effort level → restart the agent under it. */
+  onPickEffort?: (effort: EffortLevel | undefined) => void;
+  /** Restart the agent under its current model + effort. */
   onRestart?: () => void;
 }
 
 export function AgentCard({
   name, character, accent, status, project, action, progress = 0, selected, isGod, onClick,
-  model, toolCalls, restarting, canRestart, onPickModel, onRestart
+  model, effort, toolCalls, restarting, canRestart, onPickModel, onPickEffort, onRestart
 }: AgentCardProps) {
   // The god is always framed (stands out from the row); others only when selected.
   const framed = isGod || selected;
@@ -151,11 +155,24 @@ export function AgentCard({
                   onClick={onRestart}
                 >restart</PixelButton>
               </div>
+              {onPickEffort && (
+                <Select
+                  value={effort ?? ''}
+                  disabled={!canRestart || restarting}
+                  onChange={(v) => onPickEffort((v || undefined) as EffortLevel | undefined)}
+                >
+                  {AGENT_EFFORTS.map((e) => (
+                    <option key={e.label} value={e.id ?? ''}>
+                      {e.id ? `effort: ${e.label}` : 'effort: default'}{e.opus ? ' ⚠' : ''}
+                    </option>
+                  ))}
+                </Select>
+              )}
               <div style={{
                 display: 'flex', alignItems: 'center', gap: 6,
                 fontSize: 11, color: 'var(--cth-ink-500)'
               }}>
-                <span>{restarting ? 'restarting…' : !canRestart ? 'no pty' : 'model · restarts agent'}</span>
+                <span>{restarting ? 'restarting…' : !canRestart ? 'no pty' : 'model / effort · restarts agent'}</span>
                 <span style={{ marginLeft: 'auto' }}>{toolCalls ?? 0} tool calls</span>
               </div>
             </div>

@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import type { HarnessConfig } from '@/store/config';
+import { type HarnessConfig, type EffortLevel, AGENT_EFFORTS } from '@/store/config';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import { ProjectSwitcher } from './ProjectSwitcher';
@@ -121,6 +121,16 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
     setSttModel(next); // optimistic
     try { await window.cth.updateConfig({ sttModel: next }); }
     catch { setSttModel(prev); /* revert on failure */ }
+  };
+
+  // ─── Default effort level for new agents ───────────────────────────────────
+  const [defaultEffort, setDefaultEffort] = useState<EffortLevel | undefined>(config.defaultEffort);
+  const pickDefaultEffort = async (next: EffortLevel | undefined) => {
+    if (next === defaultEffort) return;
+    const prev = defaultEffort;
+    setDefaultEffort(next); // optimistic
+    try { await window.cth.updateConfig({ defaultEffort: next }); }
+    catch { setDefaultEffort(prev); /* revert on failure */ }
   };
 
   // ─── Slack integration ─────────────────────────────────────────────────────
@@ -319,6 +329,37 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
                     {m.title}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: 3 }}>{m.detail}</div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </Section>
+
+      <Section title="EFFORT">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+            Default reasoning effort for newly spawned agents (passed as <code>--effort</code>).
+            Each agent can override this from its card; Michael &amp; Dwight pick it up on their
+            next fresh spawn. <strong>default</strong> keeps Claude Code's own setting. ⚠ X-High /
+            Max are best on Opus-tier models.
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {AGENT_EFFORTS.map((e) => {
+              const sel = (defaultEffort ?? '') === (e.id ?? '');
+              return (
+                <button
+                  key={e.label}
+                  onClick={() => pickDefaultEffort(e.id)}
+                  title={e.opus ? `${e.id} — best on Opus-tier models` : (e.id ?? "Claude Code's default effort")}
+                  style={{
+                    padding: '5px 10px 4px', cursor: 'pointer', border: 'none',
+                    background: sel ? 'var(--cth-lemon-light)' : 'var(--cth-cream-100)',
+                    boxShadow: sel ? 'inset 0 0 0 2px var(--cth-ink-900)' : 'inset 0 0 0 1px var(--cth-ink-300)',
+                    fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-900)'
+                  }}
+                >
+                  {e.label}{e.opus ? ' ⚠' : ''}
                 </button>
               );
             })}

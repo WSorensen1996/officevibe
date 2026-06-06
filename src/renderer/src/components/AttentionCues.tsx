@@ -3,17 +3,18 @@ import { Icon, type IconName } from './Icon';
 
 /** Small pulsing cue chips shown next to the SELECTED agent's name. They flag
  *  states the user should glance at and give a one-click path to the right tab:
- *  - browsing  → the agent is working in the browser  → open the Browser tab
+ *  - browsing  → the agent is driving the shared Browser pane (mcp__browser__*) → open the Browser tab
  *  - needs you → the agent is blocked on your input    → open the Messages tab
  *  Each cue hides while its destination tab is already active (no redundant
- *  blinking while you're looking right at it). Renders nothing when idle. */
+ *  blinking while you're looking right at it). Renders nothing when idle.
+ *  Note: a plain text WebSearch/WebFetch does NOT raise the browse cue — its
+ *  results land in the terminal/logs, not the Browser pane, so `agent.browsing`
+ *  (set only for real browser sessions) gates this, not `currentStation === 'web'`. */
 export function AttentionCues({ agent }: { agent: Agent }) {
   const leftTab = useStore((s) => s.leftTab);
   const setLeftTab = useStore((s) => s.setLeftTab);
 
-  const browsing =
-    agent.currentStation === 'web' &&
-    (agent.status === 'working' || agent.status === 'thinking');
+  const browsing = agent.browsing === true;
   const needsYou = agent.status === 'blocked';
 
   const showBrowse = browsing && leftTab !== 'browser';

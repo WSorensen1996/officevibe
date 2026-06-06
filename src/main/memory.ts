@@ -177,13 +177,19 @@ export class MemoryManager {
 
   // — recall (read) —
 
-  /** Semantic search across the shared palace. Returns the CLI's text output. */
-  search(query: string, opts: { wing?: string; results?: number } = {}): { ok: boolean; output: string; error?: string } {
+  /** Semantic search across the shared palace. Returns the CLI's text output.
+   *  `timeoutMs` lets interactive callers (e.g. enrich) cap the blocking spawnSync
+   *  so a slow/hung mempalace can't freeze the main thread for the full 120s. */
+  search(query: string, opts: { wing?: string; results?: number; timeoutMs?: number } = {}): { ok: boolean; output: string; error?: string } {
     const bin = this.bin();
     if (!this.active() || !bin) return { ok: false, output: '', error: 'semantic memory not active' };
     const args = ['search', query, '--results', String(opts.results ?? 5)];
     if (opts.wing) args.push('--wing', opts.wing);
-    const res = spawnSync(bin, args, { env: this.childEnv(), encoding: 'utf8', timeout: 120_000, input: '' });
+    const res = spawnSync(bin, args, { env: this.childEnv(), encoding: 'utf8', timeout: opts.timeoutMs ?? 120_000, input: '' });
+    // A timeout kill surfaces as res.error (ETIMEDOUT) rather than a non-zero status.
+    if (res.error && (res.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+      return { ok: false, output: res.stdout ?? '', error: 'memory search timed out' };
+    }
     if (res.status !== 0) return { ok: false, output: res.stdout ?? '', error: (res.stderr || 'search failed').trim() };
     return { ok: true, output: res.stdout ?? '' };
   }

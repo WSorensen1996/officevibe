@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { AccentColorName } from '@/design/tokens';
 import type { OfficeCharacterName } from '@/scene/office/cast';
 import type { StatusKind } from '@/components/PixelBadge';
+import type { EffortLevel } from '@/store/config';
 
 export type ToolKind =
   | 'Read' | 'Edit' | 'Write' | 'Bash' | 'WebFetch' | 'WebSearch'
@@ -14,11 +15,23 @@ export interface BlockReason {
   summary: string;                 // short headline shown on banner
   detail: string;                  // longer explanation
   command?: string;                // verbatim command awaiting confirmation, if any
+  /** Shape of the underlying prompt — drives how the messages-tab card renders:
+   *  'menu'/'yesno' show approve/deny buttons; 'text' shows a free-text reply box. */
+  promptKind?: 'menu' | 'yesno' | 'text';
+  /** Set when this card is backed by a real PreToolUse permission hook (the modern
+   *  path). Actions resolve it via window.cth.respondPermission(requestId, …) rather
+   *  than typing keystrokes into the pty. */
+  requestId?: string;
+  /** Parsed numbered-menu options (when promptKind === 'menu'), each carrying the
+   *  exact keystroke to send (e.g. '1\r'). Legacy terminal-scrape path only. */
+  menuItems?: Array<{ index: number; label: string; send: string }>;
   actions: Array<{
     label: string;
     kind: 'approve' | 'deny' | 'neutral';
-    /** what we'd send to the tmux pane on click */
+    /** keystroke to type into the pty on click (e.g. '1\r' / 'y\r') — legacy path */
     send?: string;
+    /** verdict to send via respondPermission when `requestId` is set — hook path */
+    decision?: 'allow' | 'deny';
   }>;
 }
 
@@ -40,6 +53,11 @@ export interface Agent {
   progress: number;
   currentStation?: StationKind;
   carrying?: ToolKind;
+  /** True only while this agent is actively driving the shared Browser pane via its
+   *  mcp__browser__* tools — distinguishes a live browser session from a plain text
+   *  WebSearch/WebFetch (which also walks the avatar to the 'web' station but renders
+   *  no browser content). Drives the per-agent "watch the browser" attention cue. */
+  browsing?: boolean;
   /** latest assistant message, streamed character-by-character in the sidebar */
   recentAssistantText?: string;
   /** epoch ms — used to drive the typewriter so identical strings still re-stream */
@@ -53,6 +71,9 @@ export interface Agent {
   /** the model this agent runs on (e.g. 'claude-sonnet-4-6[1m]'); drives the
    *  model selector + the --model arg used when (re)spawning the agent */
   model?: string;
+  /** the effort level this agent runs at; drives the effort selector + the
+   *  --effort arg used when (re)spawning the agent. undefined = CLI default. */
+  effort?: EffortLevel;
   /** the last prompt the user submitted to this agent in Claude Code —
    *  shown on the floor as a card above the seated avatar */
   lastPrompt?: string;
@@ -98,6 +119,14 @@ export type LeftTab = 'office' | 'terminal' | 'browser' | 'files' | 'messages' |
  *  collide with a real task id. Reuses the whole open/close/transient-tab flow. */
 export const NEW_TASK_ID = '__new__';
 
+/** A prefill handed to the CREATE-mode task form — e.g. when a user turns a
+ *  selected sentence from a finished task's result into a new task. */
+export interface NewTaskSeed {
+  description?: string;
+  /** Task ids the new task should depend on (the source task, for provenance). */
+  dependsOn?: string[];
+}
+
 /** The four left tabs that render the selected agent's workspace (vs the shared
  *  `office`/`browser` views). */
 export const AGENT_LEFT_TABS = ['terminal', 'files', 'messages', 'logs'] as const;
@@ -130,16 +159,21 @@ interface State {
    *  May be the `NEW_TASK_ID` sentinel to mean CREATE mode (no real task yet).
    *  Transient (not persisted). */
   openTaskId: string | null;
-  /** Whether the open task lands in the read view or straight in the edit form —
-   *  lets the board offer two entry points (title click → edit, expand → view).
+  /** Prefill for the next CREATE-mode task form — set when spinning a new task
+   *  out of selected result text, consumed by AddTaskForm. Cleared whenever the
+   *  full-card view closes so it never leaks into a later unrelated create.
    *  Transient (not persisted). */
-  openTaskMode: 'view' | 'edit';
+  newTaskSeed: NewTaskSeed | null;
   /** The left tab that was active before a card was opened, so closing the
    *  full-card view returns the user where they were. Transient. */
   prevLeftTab: LeftTab;
-  /** True while Michael is actively using the browser — drives the Browser tab
+  /** True while an agent is actively using the browser — drives the Browser tab
    *  badge so the user knows to flick over. Transient (not persisted). */
   browserActive: boolean;
+  /** When set, the user has PINNED this agent's browser to the pane: auto-follow
+   *  won't switch the on-screen view to another agent that acts. null = unpinned
+   *  (the pane auto-follows whoever browses). Transient. */
+  browserPinnedAgentId: string | null;
   godStatus: GodStatus;
   /** Per-agent outgoing message queue (agent id → messages awaiting delivery).
    *  Lets the user keep "talking" to a busy agent: messages park here and are
@@ -183,12 +217,16 @@ interface State {
   setFullscreenFile: (path: string | null) => void;
   setSidebarWidth: (px: number) => void;
   setLeftTab: (tab: LeftTab) => void;
-  /** Open a task's full card in the left column (stashing the current tab to
-   *  return to), or close it (null) and restore the previous tab. Pass
-   *  `mode: 'edit'` to land directly in the edit form; defaults to the read view.
-   *  Use the `NEW_TASK_ID` sentinel as `id` to open the panel in CREATE mode. */
-  openTask: (id: string | null, mode?: 'view' | 'edit') => void;
+  /** Open a task's full card (a single editable view) in the left column,
+   *  stashing the current tab to return to — or close it (null) and restore the
+   *  previous tab. Use the `NEW_TASK_ID` sentinel as `id` to open CREATE mode. */
+  openTask: (id: string | null) => void;
+  /** Stash a prefill for the next CREATE-mode task form (used by "new task from
+   *  selection"). Pass null to clear. */
+  setNewTaskSeed: (seed: NewTaskSeed | null) => void;
   setBrowserActive: (active: boolean) => void;
+  /** Pin (or unpin, with null) the browser pane to one agent's view. */
+  setBrowserPinned: (agentId: string | null) => void;
   /** Drop persisted agents whose PTY is no longer alive in the main process.
    *  Called once at startup so a renderer reload (e.g. after the laptop sleeps)
    *  restores still-running agents and only removes truly-dead ones. */
@@ -354,9 +392,10 @@ export const useStore = create<State>((set) => ({
   sidebarWidth: initialSidebarWidth,
   leftTab: initialLeftTab,
   openTaskId: null,
-  openTaskMode: 'view',
+  newTaskSeed: null,
   prevLeftTab: initialLeftTab,
   browserActive: false,
+  browserPinnedAgentId: null,
   godStatus: 'booting',
   messageQueues: initialQueues,
   enrichEnabled: initialEnrichEnabled,
@@ -488,16 +527,20 @@ export const useStore = create<State>((set) => ({
     }
     set({ leftTab: tab });
   },
-  openTask: (id, mode = 'view') =>
+  openTask: (id) =>
     set((s) => {
       if (id === null) {
-        return { openTaskId: null, leftTab: s.prevLeftTab };
+        // Closing always wipes any pending create-seed so it can't leak into a
+        // later unrelated CREATE opened from the board's "add task" button.
+        return { openTaskId: null, leftTab: s.prevLeftTab, newTaskSeed: null };
       }
       // Stash the current real tab once so reopening doesn't lose it.
       const prevLeftTab = s.leftTab === 'task' ? s.prevLeftTab : s.leftTab;
-      return { openTaskId: id, openTaskMode: mode, leftTab: 'task', prevLeftTab };
+      return { openTaskId: id, leftTab: 'task', prevLeftTab };
     }),
-  setBrowserActive: (active) => set({ browserActive: active })
+  setNewTaskSeed: (seed) => set({ newTaskSeed: seed }),
+  setBrowserActive: (active) => set({ browserActive: active }),
+  setBrowserPinned: (agentId) => set({ browserPinnedAgentId: agentId })
 }));
 
 export function selectedAgent(s: State): Agent | undefined {

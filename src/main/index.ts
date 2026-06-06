@@ -1,5 +1,6 @@
 import { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, shell, protocol, session } from 'electron';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { rmSync, existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep, extname } from 'node:path';
 import { PtyManager, type SpawnOptions } from './pty';
@@ -15,6 +16,8 @@ import {
 import { ProjectManager, type AgentMeta, type ProjectMessage, type ProjectTask } from './project';
 import { HookServer } from './hooks';
 import { MemoryManager } from './memory';
+import { KnowledgeManager } from './knowledge';
+import { Curator } from './curator';
 import { enrichMessage } from './assistant';
 import { readAgentUsage } from './transcript';
 import { SlackWebhookServer } from './slack';
@@ -66,46 +69,127 @@ const agentToPty = new Map<string, string>();
 // variable name only; the active project folder is its data root.
 const hive = new ProjectManager(
   () => readConfig().activeProjectPath,
-  (channel, payload) => { try { liveWebContents()?.send(channel, payload); } catch { /* window tore down */ } }
+  (channel, payload) => { try { liveWebContents()?.send(channel, payload); } catch { /* window tore down */ } },
+  // Register each agent's per-agent browser token → agentId so the shared browser
+  // MCP server can resolve an incoming x-agent-token to that agent's view. Called
+  // synchronously inside ensureAgent (before the PTY spawns), so the token is known
+  // before the agent can fire a browser tool. (`agentTokenToId`, `ensureAgentBrowser`
+  // are declared in the embedded-browser section below; this closure only runs at
+  // spawn time, well after module init.)
+  (agentId, token) => {
+    agentTokenToId.set(token, agentId);
+    // Eagerly create the god's (Michael's) view on spawn so the pane shows him
+    // live on launch — matching the original single-pane experience. ensureAgent
+    // sets reg.godId before this fires; ensureAgentBrowser auto-stages it only if
+    // nothing else is staged, so a pinned sub-agent isn't stolen on a god respawn.
+    try { if (mainWindow && hive.registry().godId === agentId) ensureAgentBrowser(agentId); }
+    catch { /* registry/window not ready */ }
+  }
 );
-const hookServer = new HookServer(hive, () => liveWebContents(), () => readConfig());
 const memory = new MemoryManager(
   () => readConfig().activeProjectPath,
   () => { const c = readConfig(); return { enabled: c.semanticMemory !== false, model: c.embeddingModel ?? 'minilm' }; }
 );
+// Self-improvement ("Project Brain"): the team-shared skill library + the background
+// curator. Instantiated before hookServer because the hook injects ranked skills and
+// the curator is triggered (debounced) when an agent goes idle.
+const knowledge = new KnowledgeManager(() => readConfig().activeProjectPath, () => readConfig());
+const curator = new Curator(
+  () => readConfig().activeProjectPath,
+  () => readConfig(),
+  knowledge,
+  memory,
+  () => hive.usageLimits()
+);
+const hookServer = new HookServer(
+  hive,
+  () => liveWebContents(),
+  () => readConfig(),
+  knowledge,
+  (agentId) => curator.onAgentIdle(agentId)
+);
 let mainWindow: BrowserWindow | null = null;
 
-// ─── Embedded browser pane (god-driven native WebContentsView) ───────────────
-/** The bottom-left browser pane. A native view that paints above the DOM, so the
- *  renderer hides it (browser:setVisible) whenever a modal/fullscreen overlay is
- *  open. Created lazily on browser:ensure (BrowserPane mount) or first agent use. */
-let browserView: WebContentsView | null = null;
-/** The in-process MCP server that lets the god agent drive `browserView`. */
+// ─── Embedded browser pane (per-agent native WebContentsViews) ───────────────
+/** Every agent gets its OWN native browser view, created lazily on first
+ *  browser-tool use (or when the user clicks its tab). Exactly ONE view is "on
+ *  stage" — bound to the single bottom-left pane rect the user watches; the rest
+ *  are parked offscreen-but-visible so they keep compositing (a setVisible(false)
+ *  view stops painting → blank capturePage). Views paint above the DOM, so the
+ *  renderer hides the staged view (browser:setVisible) whenever a modal/fullscreen
+ *  overlay is open. */
+interface AgentBrowser { view: WebContentsView; lastUsed: number }
+const browserViews = new Map<string, AgentBrowser>();
+/** The in-process MCP server that lets each agent drive its own view. */
 let browserMcp: BrowserMcpHandle | null = null;
 /** Last bounds the renderer measured for the pane (CSS px = DIP). */
 let browserBounds = { x: 0, y: 0, width: 0, height: 0 };
-/** Whether the pane should be shown (false while a DOM overlay is open). */
+/** Whether the staged view should be shown (false while a DOM overlay is open). */
 let browserVisible = true;
+/** The agent whose view is currently bound to the on-screen pane rect (null = none). */
+let stageAgentId: string | null = null;
+/** Per-agent browser token (x-agent-token header) → agentId. Populated by
+ *  ProjectManager's onBrowserToken callback (above) before each agent spawns, so
+ *  the shared browser MCP server can route a request to the right agent's view. */
+const agentTokenToId = new Map<string, string>();
+/** Soft cap on concurrently-live browser views; idle ones beyond this are
+ *  LRU-evicted to bound RAM/CPU when a web task is fanned out across many agents. */
+const MAX_LIVE_BROWSERS = 5;
 
-/** The pane's live webContents, or null if it isn't up. */
-function browserWc(): Electron.WebContents | null {
-  return browserView && !browserView.webContents.isDestroyed() ? browserView.webContents : null;
+/** Filesystem/partition-safe slug for an agent id (used in the session partition).
+ *  A short hash of the FULL id is appended so two distinct ids can never collide
+ *  onto one shared partition via truncation/normalization. */
+function slugId(id: string): string {
+  const readable = id.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 24);
+  const hash = createHash('sha256').update(id).digest('hex').slice(0, 16);
+  return `${readable}-${hash}`;
 }
 
-/** Position the native view to the renderer's last-measured rect. */
+/** A given agent's live webContents, or null if its view isn't up. */
+function wcForAgent(id: string | null): Electron.WebContents | null {
+  if (!id) return null;
+  const ab = browserViews.get(id);
+  return ab && !ab.view.webContents.isDestroyed() ? ab.view.webContents : null;
+}
+
+/** The staged (on-screen) agent's live webContents, or null. */
+function stagedWc(): Electron.WebContents | null {
+  return wcForAgent(stageAgentId);
+}
+
+/** Position the STAGED view to the renderer's last-measured rect and park every
+ *  other view offscreen-but-visible (real size so it keeps compositing). */
 function applyBrowserBounds(): void {
-  if (!browserView || browserView.webContents.isDestroyed()) return;
   const b = browserBounds;
-  browserView.setBounds({
+  const onStage = {
     x: Math.round(b.x), y: Math.round(b.y),
     width: Math.max(0, Math.round(b.width)), height: Math.max(0, Math.round(b.height))
-  });
+  };
+  // Parked views need a REAL non-zero size to keep painting; default to a sane
+  // size when the pane hasn't been measured yet, and sit fully off the canvas.
+  const W = Math.max(onStage.width, 1024);
+  const H = Math.max(onStage.height, 768);
+  const parked = { x: -(W + 64), y: 0, width: W, height: H };
+  for (const [id, ab] of browserViews) {
+    if (ab.view.webContents.isDestroyed()) continue;
+    ab.view.setBounds(id === stageAgentId ? onStage : parked);
+  }
 }
 
-/** Push the pane's URL/title/loading state to the renderer chrome. */
+/** Push the STAGED view's URL/title/loading state (+ which agent it is) to the
+ *  renderer chrome. A background agent's navigation must NOT rewrite the bar, so
+ *  callers gate on agentId === stageAgentId. */
 function emitBrowserState(): void {
-  const wc = browserWc();
-  if (!wc) return;
+  const wc = stagedWc();
+  if (!wc) {
+    // Nothing staged (all torn down / none created yet) — clear the chrome.
+    try {
+      liveWebContents()?.send('browser:state', {
+        url: '', title: '', canGoBack: false, canGoForward: false, loading: false, agentId: null
+      });
+    } catch { /* window tore down */ }
+    return;
+  }
   const nav = (wc as unknown as { navigationHistory?: { canGoBack(): boolean; canGoForward(): boolean } }).navigationHistory;
   try {
     liveWebContents()?.send('browser:state', {
@@ -113,9 +197,44 @@ function emitBrowserState(): void {
       title: wc.getTitle(),
       canGoBack: nav?.canGoBack() ?? false,
       canGoForward: nav?.canGoForward() ?? false,
-      loading: wc.isLoading()
+      loading: wc.isLoading(),
+      agentId: stageAgentId
     });
   } catch { /* window tore down */ }
+}
+
+/** Push the roster of agents that currently have a browser view (+ which is
+ *  staged) so the BrowserPane can render its tab-strip. */
+function emitBrowserViews(): void {
+  let agents: Record<string, { name?: string; isGod?: boolean }> = {};
+  try { agents = hive.registry().agents; } catch { /* no project / not ready */ }
+  const views = [...browserViews.keys()].map((id) => ({
+    agentId: id,
+    name: agents[id]?.name ?? id,
+    isGod: !!agents[id]?.isGod
+  }));
+  try { liveWebContents()?.send('browser:views', { views, stageAgentId }); } catch { /* window tore down */ }
+}
+
+/** Make `agentId` the staged (on-screen) agent: swap which view sits at the pane
+ *  rect, show it (honoring the overlay guard), park the rest, and refresh chrome. */
+function stageAgent(agentId: string | null): void {
+  if (stageAgentId === agentId) return;
+  // Keep the outgoing view visible (it just becomes parked offscreen by
+  // applyBrowserBounds, so it keeps compositing); the incoming one is shown by the
+  // visibility line below. Honors the overlay guard via browserVisible.
+  const prev = wcForAgent(stageAgentId);
+  const prevView = stageAgentId ? browserViews.get(stageAgentId)?.view : null;
+  if (prevView && prev && !prev.isDestroyed()) prevView.setVisible(true);
+  stageAgentId = agentId;
+  applyBrowserBounds();
+  const ab = agentId ? browserViews.get(agentId) : null;
+  if (ab && !ab.view.webContents.isDestroyed()) {
+    ab.view.setVisible(browserVisible);
+    ab.lastUsed = Date.now();
+  }
+  emitBrowserState();
+  emitBrowserViews();
 }
 
 /** Normalize a user/agent-supplied URL to a safe http(s) URL, or null if it
@@ -131,41 +250,75 @@ function toHttpUrl(raw: unknown): string | null {
   return /^https?$/i.test(scheme[1]) ? s : null;
 }
 
-/** Create the browser WebContentsView if absent and attach it to the window.
- *  Idempotent; returns null only if there's no window yet. */
-function ensureBrowserView(): WebContentsView | null {
+/** LRU-evict idle browser views once the soft cap is reached. Never evicts the
+ *  staged view or `keepId`; an evicted agent re-creates its view next time it
+ *  browses. `lastUsed` is bumped on every browser-tool call + on staging, so a
+ *  currently-working agent has a recent timestamp and won't be the victim. */
+function evictIdleBrowsers(keepId: string): void {
+  while (browserViews.size >= MAX_LIVE_BROWSERS) {
+    let victim: string | null = null;
+    let oldest = Infinity;
+    for (const [id, ab] of browserViews) {
+      if (id === stageAgentId || id === keepId) continue;
+      if (ab.lastUsed < oldest) { oldest = ab.lastUsed; victim = id; }
+    }
+    if (!victim) break; // nothing evictable (everything is staged/kept)
+    console.log('[browser] LRU-evicting idle view', victim);
+    destroyAgentBrowser(victim);
+  }
+}
+
+/** Create agent `agentId`'s WebContentsView if absent and attach it to the window.
+ *  Idempotent; returns null only if there's no window yet. The first view created
+ *  auto-stages so the pane is never empty; the rest are parked offscreen. */
+function ensureAgentBrowser(agentId: string): WebContentsView | null {
   if (!mainWindow) return null;
-  if (browserView && !browserView.webContents.isDestroyed()) return browserView;
+  const existing = browserViews.get(agentId);
+  if (existing && !existing.view.webContents.isDestroyed()) { existing.lastUsed = Date.now(); return existing.view; }
+  evictIdleBrowsers(agentId);
   const view = new WebContentsView({
     webPreferences: {
-      // Isolated, persistent profile — the agent's logins persist across restarts
-      // but stay separate from the user's real Chrome.
-      partition: 'persist:agent-browser',
+      // Per-agent isolated, persistent profile — each agent's logins persist across
+      // restarts and stay separate from other agents and the user's real Chrome.
+      partition: `persist:agent-browser-${slugId(agentId)}`,
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false
     }
   });
   view.setBackgroundColor('#FFF8E7'); // kill the white flash before first paint
-  browserView = view;
+  browserViews.set(agentId, { view, lastUsed: Date.now() });
   mainWindow.contentView.addChildView(view);
-  console.log('[browser] WebContentsView created + attached; window children =', mainWindow.contentView.children.length);
+  if (stageAgentId === null) stageAgentId = agentId; // first view goes on stage
+  console.log('[browser] view created for', agentId, '; window children =', mainWindow.contentView.children.length);
   applyBrowserBounds();
-  view.setVisible(browserVisible);
+  // Staged view honors the overlay guard; parked views stay visible offscreen so
+  // they keep compositing (a hidden view stops painting → blank capturePage).
+  view.setVisible(agentId === stageAgentId ? browserVisible : true);
 
   const wc = view.webContents;
   // Keep popups in-pane instead of spawning OS windows (mirrors the main window).
   wc.setWindowOpenHandler(({ url }) => { const t = toHttpUrl(url); if (t) { try { void wc.loadURL(t); } catch { /* noop */ } } return { action: 'deny' }; });
-  const onChange = (): void => emitBrowserState();
+  // Enforce http/https-only on EVERY page/renderer-initiated navigation (defense in
+  // depth alongside the normalization at the tool/IPC entry points): a page can't
+  // steer the view to file:/data:/etc. (Programmatic loadURL from the tools does NOT
+  // emit will-navigate, so legitimate navigations are unaffected.)
+  const blockNonHttp = (e: { preventDefault: () => void }, url: string): void => {
+    if (!toHttpUrl(url)?.startsWith('http')) { e.preventDefault(); console.warn('[browser] blocked non-http navigation', agentId, url.slice(0, 80)); }
+  };
+  wc.on('will-navigate', (e, url) => blockNonHttp(e, url));
+  wc.on('will-redirect', (e, url) => blockNonHttp(e, url));
+  // Only the STAGED agent's navigation updates the on-screen chrome (URL bar etc.).
+  const onChange = (): void => { if (agentId === stageAgentId) emitBrowserState(); };
   wc.on('did-navigate', onChange);
   wc.on('did-navigate-in-page', onChange);
   wc.on('page-title-updated', onChange);
   wc.on('did-start-loading', onChange);
   wc.on('did-stop-loading', onChange);
   // ── Diagnostics: surface load failures + render crashes (these explain a blank/black pane).
-  wc.on('did-finish-load', () => console.log('[browser] did-finish-load', wc.getURL()));
+  wc.on('did-finish-load', () => console.log('[browser]', agentId, 'did-finish-load', wc.getURL()));
   wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
-    console.error('[browser] did-fail-load', { code, desc, url, isMainFrame });
+    console.error('[browser] did-fail-load', agentId, { code, desc, url, isMainFrame });
     // -3 = ERR_ABORTED (benign, e.g. a superseded navigation). On a real main-frame
     // failure, show a visible local page so the pane isn't just blank/black.
     if (isMainFrame && code !== -3 && !url.startsWith('data:')) {
@@ -178,23 +331,95 @@ function ensureBrowserView(): WebContentsView | null {
       );
     }
   });
-  wc.on('render-process-gone', (_e, details) => console.error('[browser] render-process-gone', JSON.stringify(details)));
-  wc.on('unresponsive', () => console.error('[browser] webContents unresponsive'));
-  console.log('[browser] loading start page https://www.google.com');
+  wc.on('render-process-gone', (_e, details) => console.error('[browser] render-process-gone', agentId, JSON.stringify(details)));
+  wc.on('unresponsive', () => console.error('[browser] webContents unresponsive', agentId));
+  console.log('[browser] loading start page https://www.google.com for', agentId);
   void wc.loadURL('https://www.google.com').catch((e) => console.error('[browser] loadURL threw', e));
+  emitBrowserViews();
+  if (agentId === stageAgentId) emitBrowserState();
   return view;
 }
 
-/** Best-effort destroy of the browser pane + its MCP server (used on quit/reset). */
+/** Destroy ONE agent's browser view, and if it was staged, re-stage the
+ *  most-recently-used remaining view (or clear the pane). `freeToken` controls
+ *  whether the agent's browser token is also revoked: TRUE only on real teardown
+ *  (the agent is gone/archived); FALSE on LRU eviction, where the agent is still
+ *  alive and must be able to lazily re-create its view on its next browser call —
+ *  revoking its token there would 401 a live agent forever. */
+function destroyAgentBrowser(agentId: string, freeToken = false): void {
+  const ab = browserViews.get(agentId);
+  if (!ab) return;
+  browserViews.delete(agentId);
+  try {
+    if (mainWindow && !ab.view.webContents.isDestroyed()) mainWindow.contentView.removeChildView(ab.view);
+  } catch (e) { console.error('[browser] removeChildView:', e); }
+  try { if (!ab.view.webContents.isDestroyed()) ab.view.webContents.close(); } catch { /* noop */ }
+  // Only revoke the token when the agent is truly gone — see freeToken doc above.
+  if (freeToken) for (const [tok, id] of agentTokenToId) if (id === agentId) agentTokenToId.delete(tok);
+  if (stageAgentId === agentId) {
+    let next: string | null = null;
+    let newest = -Infinity;
+    for (const [id, b] of browserViews) { if (b.lastUsed > newest) { newest = b.lastUsed; next = id; } }
+    stageAgentId = null;
+    if (next) stageAgent(next);
+    else { applyBrowserBounds(); emitBrowserState(); emitBrowserViews(); }
+  } else {
+    emitBrowserViews();
+  }
+}
+
+/** Guards the capture-on-demand fallback so at most one runs at a time — two
+ *  overlapping fallbacks would each snapshot the other's transient stage and
+ *  restore in the wrong order. */
+let capturingOnStage = false;
+
+/** Capture a PNG (base64) of an agent's page, even if its view is parked
+ *  offscreen. A parked/zero-intersection view can have a throttled compositor
+ *  that returns a blank image, so on an empty capture we briefly stage it to
+ *  force a paint, capture, then restore the previous stage (a brief on-screen
+ *  flicker, only on the fallback path). Returns '' on failure. */
+async function captureAgentPage(agentId: string): Promise<string> {
+  const wc = wcForAgent(agentId);
+  if (!wc) return '';
+  const grab = async (): Promise<string> => {
+    try { const img = await wc.capturePage(); return img.toPNG().toString('base64'); }
+    catch { return ''; }
+  };
+  const data = await grab();
+  if (data || agentId === stageAgentId) return data; // staged views always paint
+  // Fallback: bring it on stage briefly to force a paint, then restore. Serialized
+  // (one at a time) — if another capture is mid-flight, just return what we have.
+  if (capturingOnStage) return data;
+  capturingOnStage = true;
+  const prevStage = stageAgentId;
+  try {
+    stageAgent(agentId);
+    await new Promise((r) => setTimeout(r, 250));
+    const retry = await grab();
+    // Restore ONLY if nothing else re-staged during our window (e.g. a user tab
+    // click or another agent's auto-follow). Restoring blindly would clobber that
+    // legitimate change. Restore to prevStage only if it still has a live view;
+    // otherwise leave the just-captured view staged (avoids an empty pane).
+    if (stageAgentId === agentId && prevStage && wcForAgent(prevStage)) stageAgent(prevStage);
+    return retry || data;
+  } finally {
+    capturingOnStage = false;
+  }
+}
+
+/** Best-effort destroy of ALL browser views + the MCP server (used on quit/reset). */
 function teardownBrowser(): void {
   try { browserMcp?.stop(); } catch (e) { console.error('[browser] mcp stop:', e); }
   browserMcp = null;
-  try {
-    if (browserView && mainWindow && !browserView.webContents.isDestroyed()) {
-      mainWindow.contentView.removeChildView(browserView);
-    }
-  } catch (e) { console.error('[browser] removeChildView:', e); }
-  browserView = null;
+  for (const [, ab] of browserViews) {
+    try {
+      if (mainWindow && !ab.view.webContents.isDestroyed()) mainWindow.contentView.removeChildView(ab.view);
+    } catch (e) { console.error('[browser] removeChildView:', e); }
+    try { if (!ab.view.webContents.isDestroyed()) ab.view.webContents.close(); } catch { /* noop */ }
+  }
+  browserViews.clear();
+  agentTokenToId.clear();
+  stageAgentId = null;
 }
 
 /** When true, skip the quit interceptor (user already confirmed). */
@@ -230,11 +455,18 @@ function teardownPty(id: string): void {
   const agentId = ptyToAgent.get(id);
   if (agentId) {
     ptyToAgent.delete(id);
+    // Release any permission prompts this agent was blocked on — its PTY is gone,
+    // so no one can answer them; deny + clear so the card doesn't linger.
+    try { hookServer.rejectForAgent(agentId); } catch (e) { console.error('[hooks] rejectForAgent failed:', e); }
     if (agentToPty.get(agentId) === id) {
       agentToPty.delete(agentId);
       if (hive.enabled()) {
         try { hive.setArchived(agentId, true); } catch (e) { console.error('[hive] setArchived failed:', e); }
       }
+      // Tear down this agent's browser view AND revoke its token (the agent is
+      // archived — gone — so it shouldn't keep a renderer process alive, leave a
+      // tab in the strip, or retain a usable browser token).
+      try { destroyAgentBrowser(agentId, true); } catch (e) { console.error('[browser] destroyAgentBrowser failed:', e); }
     }
   }
   // 2) Remove the isolated worktree, if any. Non-blocking; errors are logged.
@@ -477,6 +709,12 @@ function createWindow(): void {
 
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null;
+    // The browser views were children of this window's contentView, so they died
+    // with it. Drop the now-dangling map entries + stage so a reopen (macOS
+    // 'activate') rebuilds a clean tab-strip and re-creates views lazily. Keep the
+    // MCP server + per-agent tokens — the agents themselves are still alive.
+    browserViews.clear();
+    stageAgentId = null;
   });
 }
 
@@ -521,7 +759,7 @@ ipcMain.handle('pty:spawn', async (_evt, opts: SpawnOptions & { hive?: AgentMeta
   // identity + protocol (extra --append-system-prompt args + AGENT_* env).
   if (opts.hive && hive.enabled()) {
     try {
-      const inj = hive.ensureAgent({ ...opts.hive, cwd: opts.cwd }, { semanticMemory: memory.active() });
+      const inj = hive.ensureAgent({ ...opts.hive, cwd: opts.cwd }, { semanticMemory: memory.active(), knowledge: knowledge.enabled() });
       opts.args = [...(opts.args ?? []), ...inj.args];
       // Point the agent's mempalace CLI at the shared palace (no-op if inactive).
       opts.env = { ...(opts.env ?? {}), ...inj.env, ...memory.env() };
@@ -558,6 +796,18 @@ ipcMain.handle('pty:kill', (_evt, id: string) => {
   return res;
 });
 ipcMain.handle('pty:list', () => ptyManager.list());
+
+// ─── IPC: permission gate (renderer answers a PreToolUse approval card) ──────
+// The renderer resolves a pending PreToolUse hook held open by HookServer; main
+// writes the allow/deny decision back to the (blocked) agent's hook socket.
+ipcMain.handle('permission:respond', (_evt, payload: { requestId?: unknown; decision?: unknown; reason?: unknown }) => {
+  const requestId = typeof payload?.requestId === 'string' ? payload.requestId : '';
+  const decision = payload?.decision === 'allow' || payload?.decision === 'deny' ? payload.decision : null;
+  if (!requestId || !decision) return { ok: false, error: 'invalid args' };
+  const reason = typeof payload?.reason === 'string' ? payload.reason : undefined;
+  hookServer.respond(requestId, decision, reason);
+  return { ok: true };
+});
 
 // ─── IPC: clipboard ─────────────────────────────────────────────────────────
 ipcMain.handle('app:copyToClipboard', (_evt, text: unknown) => {
@@ -624,6 +874,8 @@ ipcMain.handle('project:tasks', () => hive.tasks());
 ipcMain.handle('project:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
 ipcMain.handle('project:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));
 ipcMain.handle('project:inbox', (_evt, id: unknown) => (typeof id === 'string' ? hive.inbox(id) : []));
+ipcMain.handle('project:says', (_evt, id: unknown, n: unknown) =>
+  (typeof id === 'string' ? hive.saysTail(id, typeof n === 'number' ? n : 200) : []));
 ipcMain.handle('project:send', (_evt, partial: Partial<ProjectMessage>, from: unknown) => {
   if (!hive.enabled()) return { ok: false, error: 'no active project' };
   const { message, delivered } = hive.send(partial ?? {}, typeof from === 'string' ? from : 'system');
@@ -709,25 +961,46 @@ ipcMain.handle('assistant:enrich', async (_evt, payload: unknown) => {
   const cfg = readConfig();
   const cwd = typeof p.cwd === 'string' && p.cwd ? p.cwd : cfg.activeProjectPath;
   if (!cwd) return { ok: false, error: 'no working directory available' };
+  const mode = p.mode === 'task' ? 'task' : 'message';
+
+  // Task enrich no longer explores the repo — it rewrites from the team's
+  // MemPalace memories. Fetch the most relevant ones here (short timeout so a
+  // slow mempalace can't freeze the main thread). If memory is off/empty we
+  // still enrich, just from the user's intent alone (see buildTaskDescriptionPrompt).
+  let memories: string | undefined;
+  let memoryUnavailable = false;
+  if (mode === 'task') {
+    if (memory.status().active) {
+      const r = memory.search(p.message, { results: 8, timeoutMs: 10_000 });
+      if (r.ok && r.output.trim()) memories = r.output;
+      else memoryUnavailable = true;
+    } else {
+      memoryUnavailable = true;
+    }
+  }
+
   try {
-    return await enrichMessage({
+    const res = await enrichMessage({
       message: p.message,
       cwd,
       repos: cfg.registeredRepos ?? [],
       command: cfg.defaultCommand,
-      // Track the configured default model like the PTY agents do — unset → no
-      // --model flag → the subscription's default model (no surprise cost).
+      // Only used by the legacy 'message' path now; 'task' is pinned to a fast
+      // model inside enrichMessage. Unset → no --model flag → CLI default.
       model: cfg.defaultModel,
       env: memory.env(),
-      mode: p.mode === 'task' ? 'task' : 'message'
+      mode,
+      memories
     });
+    // Soft, non-fatal signal so the UI can note that no memories were used.
+    return memoryUnavailable ? { ...res, memoryUnavailable: true } : res;
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 });
 
 // ─── IPC: semantic memory (MemPalace CLI) ───────────────────────────────────
-ipcMain.handle('project:memoryStatus', () => { memory.resetBinCache(); return memory.status(); });
+ipcMain.handle('project:memoryStatus', () => { memory.resetBinCache(); memory.start(); return memory.status(); });
 ipcMain.handle('project:searchMemory', (_evt, query: unknown, wing: unknown) => {
   if (typeof query !== 'string' || !query.trim()) return { ok: false, output: '', error: 'empty query' };
   return memory.search(query, { wing: typeof wing === 'string' ? wing : undefined });
@@ -746,6 +1019,7 @@ function teardownServices(tag: string): void {
   try { hookServer.stop(); } catch (e) { console.error(`[${tag}] hookServer.stop:`, e); }
   try { stopSlackServer(); } catch (e) { console.error(`[${tag}] slack.stop:`, e); }
   try { memory.stop(); } catch (e) { console.error(`[${tag}] memory.stop:`, e); }
+  try { curator.stop(); } catch (e) { console.error(`[${tag}] curator.stop:`, e); }
   try { teardownBrowser(); } catch (e) { console.error(`[${tag}] teardownBrowser:`, e); }
   try { ptyManager.killAll(); } catch (e) { console.error(`[${tag}] killAll:`, e); }
 }
@@ -946,31 +1220,65 @@ ipcMain.handle('mcp:test', (_evt, raw: unknown) => {
   return testConnection(res.value);
 });
 
-// ─── IPC: embedded browser pane (user chrome → native WebContentsView) ───────
+// ─── IPC: Knowledge library (Project Brain skills — the Skills tab) ───────────
+ipcMain.handle('knowledge:list', () => {
+  if (!knowledge.enabled()) return { ok: false, error: 'skill library disabled or no active project' };
+  return { ok: true, skills: knowledge.listForAdmin(), status: knowledge.status() };
+});
+ipcMain.handle('knowledge:get', (_evt, slug: unknown) => {
+  if (typeof slug !== 'string') return { ok: false, error: 'invalid slug' };
+  const skill = knowledge.getSkill(slug);
+  return skill ? { ok: true, skill } : { ok: false, error: 'not found' };
+});
+ipcMain.handle('knowledge:save', (_evt, input: unknown) => {
+  if (!input || typeof input !== 'object') return { ok: false, error: 'invalid skill' };
+  return knowledge.saveSkill(input as { slug?: string; title: string; description?: string; tags?: string[]; body: string; isNew?: boolean });
+});
+ipcMain.handle('knowledge:archive', (_evt, slug: unknown) =>
+  typeof slug === 'string' ? knowledge.archiveSkill(slug) : { ok: false, error: 'invalid slug' });
+ipcMain.handle('knowledge:restore', (_evt, slug: unknown) =>
+  typeof slug === 'string' ? knowledge.restoreSkill(slug) : { ok: false, error: 'invalid slug' });
+ipcMain.handle('knowledge:delete', (_evt, slug: unknown) =>
+  typeof slug === 'string' ? knowledge.deleteSkill(slug) : { ok: false, error: 'invalid slug' });
+ipcMain.handle('knowledge:curateNow', async () => {
+  try { await curator.runCycle('manual'); return { ok: true }; }
+  catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
+});
+
+// ─── IPC: embedded browser pane (user chrome → staged native WebContentsView) ─
+/** Resolve the agent the user's chrome (URL bar, nav buttons) should drive: the
+ *  staged agent if any, else the god (Michael) so the pane works on launch. */
+function userPaneAgentId(): string | null {
+  if (stageAgentId) return stageAgentId;
+  try { return hive.registry().godId; } catch { return null; }
+}
 ipcMain.handle('browser:ensure', () => {
   console.log('[browser] ipc browser:ensure (mainWindow=', !!mainWindow, ')');
-  const v = ensureBrowserView();
+  const id = userPaneAgentId();
+  const v = id ? ensureAgentBrowser(id) : null;
   if (v) emitBrowserState();
-  return { ok: !!v, error: v ? undefined : 'no window' };
+  emitBrowserViews();
+  return { ok: !!v, error: v ? undefined : 'no window or god not ready' };
 });
 ipcMain.handle('browser:navigate', async (_evt, url: unknown) => {
   if (typeof url !== 'string' || !url.trim()) return { ok: false, error: 'invalid url' };
   const target = toHttpUrl(url);
   if (!target) return { ok: false, error: 'unsupported url scheme (http/https only)' };
-  const v = ensureBrowserView();
-  if (!v) return { ok: false, error: 'no window' };
+  const id = userPaneAgentId();
+  const v = id ? ensureAgentBrowser(id) : null;
+  if (!v) return { ok: false, error: 'no staged agent' };
   try { await v.webContents.loadURL(target); return { ok: true }; }
   catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
 });
 ipcMain.handle('browser:goBack', () => {
-  const nav = (browserWc() as unknown as { navigationHistory?: { canGoBack(): boolean; goBack(): void } } | null)?.navigationHistory;
+  const nav = (stagedWc() as unknown as { navigationHistory?: { canGoBack(): boolean; goBack(): void } } | null)?.navigationHistory;
   if (nav?.canGoBack()) nav.goBack();
 });
 ipcMain.handle('browser:goForward', () => {
-  const nav = (browserWc() as unknown as { navigationHistory?: { canGoForward(): boolean; goForward(): void } } | null)?.navigationHistory;
+  const nav = (stagedWc() as unknown as { navigationHistory?: { canGoForward(): boolean; goForward(): void } } | null)?.navigationHistory;
   if (nav?.canGoForward()) nav.goForward();
 });
-ipcMain.handle('browser:reload', () => { browserWc()?.reload(); });
+ipcMain.handle('browser:reload', () => { stagedWc()?.reload(); });
 ipcMain.handle('browser:setBounds', (_evt, rect: unknown) => {
   if (!rect || typeof rect !== 'object') return;
   const r = rect as Record<string, unknown>;
@@ -983,7 +1291,18 @@ ipcMain.handle('browser:setBounds', (_evt, rect: unknown) => {
 ipcMain.handle('browser:setVisible', (_evt, visible: unknown) => {
   browserVisible = visible === true;
   console.log('[browser] ipc browser:setVisible', browserVisible);
-  if (browserView && !browserView.webContents.isDestroyed()) browserView.setVisible(browserVisible);
+  // Parked (background) views are already offscreen; only the staged view's
+  // visibility tracks the overlay guard.
+  const ab = stageAgentId ? browserViews.get(stageAgentId) : null;
+  if (ab && !ab.view.webContents.isDestroyed()) ab.view.setVisible(browserVisible);
+});
+ipcMain.handle('browser:stage', (_evt, agentId: unknown) => {
+  if (typeof agentId !== 'string' || !agentId) return;
+  // Auto-follow may fire on an agent's first browser tool before its view is
+  // attached; create it so the pane can follow immediately. (Tab clicks always
+  // reference an agent that already has a view.)
+  if (!browserViews.has(agentId) && !ensureAgentBrowser(agentId)) return;
+  stageAgent(agentId);
 });
 
 app.whenReady().then(() => {
@@ -1049,18 +1368,32 @@ app.whenReady().then(() => {
     syncMissions(); // arm recurring auto-dispatch missions now the router is live
     hookServer.start();
     memory.start(); // init per-project palace + mine loop (no-op without mempalace)
+    knowledge.ensureScaffold(); // seed the skill library dirs (no-op when disabled)
+    curator.start(); // background promote/lifecycle/consolidate loop (no-op when disabled)
   }
   createWindow();
   // Start the in-process browser MCP server and hand its endpoint to the hive so
-  // the god agent spawns with a --mcp-config pointing at it. Best-effort: binding
-  // a localhost port is near-instant and resolves well before the renderer kicks
-  // off the god spawn (~1.2s after load), so Michael gets the browser tool.
+  // EVERY agent spawns with a --mcp-config pointing at it (each with its own
+  // x-agent-token). Best-effort: binding a localhost port is near-instant and
+  // resolves well before the renderer kicks off the god spawn (~1.2s after load).
+  // The resolver maps the request's token → that agent's lazily-created view.
   void startBrowserMcp({
-    ensureView: () => { ensureBrowserView(); },
-    getWebContents: () => browserWc()
+    resolve: (token) => {
+      const id = agentTokenToId.get(token);
+      if (!id) return null;
+      return {
+        ensureView: () => {
+          ensureAgentBrowser(id);
+          const ab = browserViews.get(id);
+          if (ab) ab.lastUsed = Date.now(); // keep a browsing agent off the LRU chopping block
+        },
+        getWebContents: () => wcForAgent(id),
+        capture: () => captureAgentPage(id)
+      };
+    }
   }).then((handle) => {
     browserMcp = handle;
-    hive.setBrowserEndpoint(handle.url, handle.token);
+    hive.setBrowserEndpoint(handle.url);
     console.log('[browser-mcp] listening', handle.url);
   }).catch((e) => console.error('[browser-mcp] failed to start:', e));
   // Auto-start the Slack webhook server when configured. Best-effort: a tunnel

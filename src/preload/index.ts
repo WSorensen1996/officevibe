@@ -25,6 +25,16 @@ export interface ProjectMessage {
   created_at: string;
 }
 
+/** One natural-language utterance an agent produced during a turn — "what it said"
+ *  while working (mirrors main's AgentSay). Captured from the transcript on Stop and
+ *  shown in the Messages tab. */
+export interface AgentSay {
+  id: string;
+  ts: string;
+  text: string;
+  turn: string;
+}
+
 export interface ProjectRegistry {
   godId: string | null;
   /** `archived` agents have had their terminal closed — retained + flagged, not
@@ -54,8 +64,14 @@ export interface ProjectTask {
   updates?: TaskUpdate[];
   /** ISO of the last status change — recency tiebreaker for the writeTasks merge. */
   statusUpdatedAt?: string;
+  /** ISO of the last UI dispatch — hides the dispatch button until the task's
+   *  status next changes (re-nudgeable when blocked). */
+  dispatchedAt?: string;
   /** Human-set: archived tasks are hidden from the board and listed separately. */
   archived?: boolean;
+  /** ISO of the last time the human opened this card — drives the unread indicator.
+   *  Renderer-owned; round-trips via the writeTasks `...t` spread. */
+  viewedAt?: string;
 }
 
 /** A message the router just delivered, with its resolved recipient ids. Drives
@@ -129,6 +145,31 @@ export interface McpServerDef {
   headers?: Record<string, string>;
 }
 
+/** One row in the Skills tab: an index entry joined with usage telemetry
+ *  (mirrors SkillAdminRow in src/main/knowledge.ts). */
+export interface KnowledgeSkill {
+  slug: string;
+  title: string;
+  desc: string;
+  tags: string[];
+  state: 'provisional' | 'active' | 'stale' | 'archived';
+  created_by: string;
+  pinned: boolean;
+  created_at: string;
+  last_used_at: string | null;
+  use_count: number;
+  inject_count: number;
+}
+
+export interface KnowledgeStatus {
+  enabled: boolean;
+  total: number;
+  active: number;
+  provisional: number;
+  stale: number;
+  archived: number;
+}
+
 export interface HarnessConfig {
   onboardingComplete: boolean;
   /** Default parent directory for newly created projects (the old "harness home"). */
@@ -143,6 +184,8 @@ export interface HarnessConfig {
   remoteControl?: boolean;
   defaultCommand: string;
   defaultModel?: string;
+  /** Default effort level for newly spawned agents (passed as `--effort <level>`); unset = CLI default. */
+  defaultEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   semanticMemory: boolean;
   embeddingModel: 'minilm' | 'embeddinggemma';
   sttModel: 'whisper-base.en' | 'whisper-tiny.en';
@@ -197,14 +240,30 @@ export interface UsageLimits {
   capturedAt: number;
 }
 
-/** Live state of the embedded browser pane (the native WebContentsView), pushed
- *  to the renderer chrome on every navigation / load change. */
+/** Live state of the STAGED (on-screen) agent's browser view, pushed to the
+ *  renderer chrome on every navigation / load change. `agentId` is whose view is
+ *  currently on stage (null when none is). */
 export interface BrowserState {
   url: string;
   title: string;
   canGoBack: boolean;
   canGoForward: boolean;
   loading: boolean;
+  agentId: string | null;
+}
+
+/** One agent that currently has a live browser view — a tab in the pane's strip. */
+export interface BrowserView {
+  agentId: string;
+  name: string;
+  isGod: boolean;
+}
+
+/** The browser tab-strip roster + which agent is staged, pushed on
+ *  create / teardown / stage. */
+export interface BrowserViews {
+  views: BrowserView[];
+  stageAgentId: string | null;
 }
 
 /** Pixel rect (CSS px = Electron DIP) the renderer measures for the browser pane. */
@@ -296,6 +355,8 @@ const api = {
   projectLog: (n?: number): Promise<unknown[]> => ipcRenderer.invoke('project:log', n ?? 200),
   projectMemory: (id: string): Promise<string> => ipcRenderer.invoke('project:memory', id),
   projectInbox: (id: string): Promise<ProjectMessage[]> => ipcRenderer.invoke('project:inbox', id),
+  /** What the agent said while working (its natural-language output per turn). */
+  projectSays: (id: string, n?: number): Promise<AgentSay[]> => ipcRenderer.invoke('project:says', id, n),
 
   // ─── Semantic memory (MemPalace CLI) ─────────────────────────────────────
   memoryStatus: (): Promise<MemoryStatus> => ipcRenderer.invoke('project:memoryStatus'),
@@ -313,7 +374,7 @@ const api = {
    *  context); the assistant may read every registered repo to gather more.
    *  `mode: 'task'` returns a self-contained task description instead of a
    *  Michael-addressed prompt (used by the Kanban task form). */
-  enrichMessage: (req: { message: string; cwd: string; mode?: 'message' | 'task' }): Promise<{ ok: boolean; prompt?: string; error?: string }> =>
+  enrichMessage: (req: { message: string; cwd: string; mode?: 'message' | 'task' }): Promise<{ ok: boolean; prompt?: string; error?: string; memoryUnavailable?: boolean }> =>
     ipcRenderer.invoke('assistant:enrich', req),
   onProjectHookEvent: (
     cb: (e: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string; message?: string; blocked?: boolean }) => void
@@ -339,6 +400,39 @@ const api = {
     ipcRenderer.on('project:taskUpdated', listener);
     return () => ipcRenderer.removeListener('project:taskUpdated', listener);
   },
+  /** An agent just said something (captured from its transcript on Stop). Drives a
+   *  live append to the Messages tab. Same subscription shape as onProjectMessage. */
+  onProjectAgentSaid: (
+    cb: (e: { agentId: string; says: AgentSay[] }) => void
+  ): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: { agentId: string; says: AgentSay[] }) => cb(payload);
+    ipcRenderer.on('project:agentSaid', listener);
+    return () => ipcRenderer.removeListener('project:agentSaid', listener);
+  },
+
+  // ─── Permission gate (PreToolUse approval cards) ─────────────────────────────
+  /** An agent's PreToolUse hook is blocked awaiting the user's approval. Carries the
+   *  exact tool + structured input so the card shows precisely what's being approved. */
+  onPermissionRequest: (
+    cb: (e: { requestId: string; agentId?: string; tool: string; input?: unknown; cwd?: string }) => void
+  ): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: { requestId: string; agentId?: string; tool: string; input?: unknown; cwd?: string }) => cb(payload);
+    ipcRenderer.on('permission:request', listener);
+    return () => ipcRenderer.removeListener('permission:request', listener);
+  },
+  /** A pending permission request was resolved out-of-band (timed out / agent died) —
+   *  clear its card. */
+  onPermissionResolved: (
+    cb: (e: { requestId: string; timedOut?: boolean }) => void
+  ): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: { requestId: string; timedOut?: boolean }) => cb(payload);
+    ipcRenderer.on('permission:resolved', listener);
+    return () => ipcRenderer.removeListener('permission:resolved', listener);
+  },
+  /** Answer a pending PreToolUse approval (allow/deny). On deny, `reason` is fed back
+   *  to the model as the explanation. */
+  respondPermission: (requestId: string, decision: 'allow' | 'deny', reason?: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('permission:respond', { requestId, decision, reason }),
 
   // ─── Quit confirmation ───────────────────────────────────────────────────
   onCloseRequested: (cb: (info: { ptyCount: number }) => void): (() => void) => {
@@ -431,6 +525,26 @@ const api = {
   mcpTest: (def: McpServerDef): Promise<{ ok: boolean; tools?: string[]; error?: string }> =>
     ipcRenderer.invoke('mcp:test', def),
 
+  // ─── Knowledge library (Project Brain skills — the Skills tab) ───────────────
+  /** All skills (incl. archived) + a status summary, for the admin tab. */
+  knowledgeList: (): Promise<{ ok: boolean; skills?: KnowledgeSkill[]; status?: KnowledgeStatus; error?: string }> =>
+    ipcRenderer.invoke('knowledge:list'),
+  /** A single skill parsed for view/edit (frontmatter stripped → body). */
+  knowledgeGet: (slug: string): Promise<{ ok: boolean; skill?: { slug: string; title: string; description: string; tags: string[]; body: string }; error?: string }> =>
+    ipcRenderer.invoke('knowledge:get', slug),
+  /** Create (isNew) or update a skill; user-authored skills become human-owned. */
+  knowledgeSave: (input: { slug?: string; title: string; description?: string; tags?: string[]; body: string; isNew?: boolean }): Promise<{ ok: boolean; slug?: string; error?: string }> =>
+    ipcRenderer.invoke('knowledge:save', input),
+  knowledgeArchive: (slug: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('knowledge:archive', slug),
+  knowledgeRestore: (slug: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('knowledge:restore', slug),
+  knowledgeDelete: (slug: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('knowledge:delete', slug),
+  /** Run a curator cycle now (promote proposals + lifecycle + budget-gated consolidation). */
+  knowledgeCurateNow: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('knowledge:curateNow'),
+
   // ─── Embedded browser pane (god-driven native WebContentsView, bottom-left) ──
   browser: {
     /** Create the WebContentsView if it doesn't exist yet (idempotent). */
@@ -442,13 +556,21 @@ const api = {
     reload: (): Promise<void> => ipcRenderer.invoke('browser:reload'),
     /** Position the native view to track the renderer's placeholder rect. */
     setBounds: (rect: BrowserBounds): Promise<void> => ipcRenderer.invoke('browser:setBounds', rect),
-    /** Show/hide the native view (hide it whenever a DOM overlay is open). */
+    /** Show/hide the staged view (hide it whenever a DOM overlay is open). */
     setVisible: (visible: boolean): Promise<void> => ipcRenderer.invoke('browser:setVisible', visible),
-    /** Subscribe to live URL/title/loading state. Returns an unsubscribe fn. */
+    /** Make `agentId`'s browser the staged (on-screen) one — a tab click or auto-follow. */
+    stage: (agentId: string): Promise<void> => ipcRenderer.invoke('browser:stage', agentId),
+    /** Subscribe to live URL/title/loading state of the staged view. Returns an unsubscribe fn. */
     onState: (cb: (s: BrowserState) => void): (() => void) => {
       const listener = (_e: IpcRendererEvent, s: BrowserState) => cb(s);
       ipcRenderer.on('browser:state', listener);
       return () => ipcRenderer.removeListener('browser:state', listener);
+    },
+    /** Subscribe to the tab-strip roster (agents with a live browser + the staged one). */
+    onViews: (cb: (v: BrowserViews) => void): (() => void) => {
+      const listener = (_e: IpcRendererEvent, v: BrowserViews) => cb(v);
+      ipcRenderer.on('browser:views', listener);
+      return () => ipcRenderer.removeListener('browser:views', listener);
     }
   }
 };

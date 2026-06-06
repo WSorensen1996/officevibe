@@ -23,23 +23,12 @@ const TOOLKIND_BY_NAME: Record<string, ToolKind> = {
   TodoWrite: 'TodoWrite'
 };
 
-// "Blocked" = Claude is genuinely waiting on the user. Match only real prompts
-// (the approval menu / a yes-no question). Do NOT match the bare word
-// "permission": the TUI footer always shows "bypass permissions on (shift+tab
-// to cycle)", which would otherwise flag a busy agent as blocked on every
-// repaint — making it flip-flop between working and blocked.
-const BLOCK_HINTS = [
-  /Do you want to proceed/i,
-  /❯\s*\d+\.\s*Yes/i,            // numbered approval menu, cursor on "1. Yes"
-  /Yes, and don't ask again/i,
-  /\(y\/n\)/i,
-  /\[y\/n\]/i,
-];
-
 /**
- * Subscribe to a pty stream and update the agent's avatar state based on what
- * scrolls past. This is a stopgap until we wire real Claude Code hooks — it
- * inspects the visible terminal output and infers status / station / carrying.
+ * Subscribe to a pty stream and refine the agent's on-floor avatar state (station /
+ * carry / working-vs-idle) from the tool lines that scroll past. It is NOT the
+ * source of truth for status — Claude Code hooks are (see useProject): the
+ * PreToolUse permission gate raises approval cards and Stop/Notification settle
+ * idle. This only animates the avatar between those authoritative events.
  *
  * Returns a function suitable for `<PtyTerminalView onStreamData={...} />`.
  */
@@ -123,41 +112,10 @@ export function usePtyParser(agentId: string) {
       return;
     }
 
-    // Not running → a genuine approval/question prompt is on screen.
-    const recent = text.slice(-400);
-    if (BLOCK_HINTS.some(re => re.test(recent))) {
-      // Only the god agent talks to the human, so only it is truly "blocked"
-      // (needs you). A sub-agent sitting at a prompt is autonomous — it reads as
-      // "waiting" and we don't raise a human-approval card for it.
-      const isGod = !!useStore.getState().agents.find((a) => a.id === agentId)?.isGod;
-      if (isGod) {
-        updateAgent(agentId, {
-          status: 'blocked',
-          action: 'waiting on you',
-          description: 'waiting on you',
-          currentStation: 'mailbox',
-          blockReason: {
-            summary: 'Waiting for your reply',
-            detail: 'Claude is waiting for input. Check the terminal for the exact prompt.',
-            actions: [
-              { label: 'Approve', kind: 'approve', send: 'y\r' },
-              { label: 'Deny',    kind: 'deny',    send: 'n\r' }
-            ]
-          }
-        });
-      } else {
-        updateAgent(agentId, {
-          status: 'waiting',
-          action: 'waiting on god',
-          description: 'waiting on god',
-          currentStation: 'desk',
-          blockReason: undefined
-        });
-      }
-      return;
-    }
-
-    // Turn finished, no prompt on screen → let it drift to idle.
+    // Not running and no fresh tool line → the turn finished. Approval prompts and
+    // free-text questions are surfaced via Claude Code hooks (the PreToolUse
+    // permission gate + Notification), not by scraping the terminal — so just let
+    // the avatar drift to idle.
     scheduleIdle();
   }, [agentId, updateAgent, pushFeed, scheduleIdle, cancelIdle]);
 }

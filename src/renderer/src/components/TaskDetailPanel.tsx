@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore, NEW_TASK_ID } from '@/store/store';
 import { useTasks } from '@/hooks/useTasks';
 import { Markdown } from './Markdown';
@@ -8,12 +8,156 @@ import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import { PriorityDots, AddTaskForm } from './TasksKanban';
 import {
-  type Status,
   COLUMNS,
   UPDATE_COLOR,
   shortWhen,
-  intervalLabel
+  intervalLabel,
+  extractDeliverableSlugs,
+  isTaskUnread
 } from './tasks/taskShared';
+
+/** The agent update history (display-only). Shared by the read view and the edit
+ *  view so the full progress log is visible however the card was opened. Renders
+ *  every update at full length (Markdown) with its kind, author, and timestamp. */
+function TaskUpdates({ updates, nameFor }: {
+  updates: { kind: keyof typeof UPDATE_COLOR; by?: string; ts?: string; text: string }[];
+  nameFor: (id?: string) => string | undefined;
+}) {
+  return (
+    <Section title={`UPDATES (${updates.length})`}>
+      {updates.length === 0 && <Muted>No updates yet.</Muted>}
+      {updates.map((u, i) => (
+        <div key={i} style={{
+          marginBottom: 10, padding: 8,
+          background: 'var(--cth-paper-100)', boxShadow: `inset 0 0 0 1px ${UPDATE_COLOR[u.kind]}`
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+            <span style={{
+              fontFamily: 'var(--cth-font-display)', fontSize: 8, textTransform: 'uppercase',
+              color: UPDATE_COLOR[u.kind]
+            }}>{u.kind}</span>
+            <span style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
+              {nameFor(u.by) ?? u.by}
+              {u.ts ? ` · ${new Date(u.ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : ''}
+            </span>
+          </div>
+          <Markdown>{u.text}</Markdown>
+        </div>
+      ))}
+    </Section>
+  );
+}
+
+/** The full markdown body of one deliverable, loaded on demand via knowledgeGet
+ *  (which — post knowledge.ts fix — resolves bare `knowledge/<slug>.md` files too).
+ *  Rendered inline so the full conclusion sits right under the task that produced it. */
+function DeliverableReader({ slug }: { slug: string }) {
+  const [state, setState] = useState<{ body?: string; error?: string; loading: boolean }>({ loading: true });
+  useEffect(() => {
+    let alive = true;
+    setState({ loading: true });
+    window.cth.knowledgeGet(slug)
+      .then((r) => {
+        if (!alive) return;
+        if (r.ok && r.skill) setState({ loading: false, body: r.skill.body });
+        else setState({ loading: false, error: r.error ?? 'could not load deliverable' });
+      })
+      .catch((e) => { if (alive) setState({ loading: false, error: e instanceof Error ? e.message : String(e) }); });
+    return () => { alive = false; };
+  }, [slug]);
+
+  return (
+    <div style={{ marginTop: 6, padding: 10, background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)' }}>
+      {state.loading && <Muted>loading…</Muted>}
+      {state.error && <div style={{ fontSize: 13, color: 'var(--cth-coral)' }}>{state.error}</div>}
+      {state.body !== undefined && <Markdown>{state.body}</Markdown>}
+    </div>
+  );
+}
+
+/** The RESULT section: the knowledge deliverables this task produced, each
+ *  expandable to its full markdown. A lone deliverable auto-expands so the
+ *  conclusion is visible immediately; multiples list collapsed. Renders nothing
+ *  when the task referenced no deliverable (no noise on ordinary tasks). */
+function Deliverables({ slugs }: { slugs: string[] }) {
+  const [open, setOpen] = useState<string | null>(slugs.length === 1 ? slugs[0] : null);
+  if (slugs.length === 0) return null;
+  return (
+    <Section title="RESULT">
+      {slugs.map((slug) => {
+        const expanded = open === slug;
+        return (
+          <div key={slug} style={{ marginBottom: 8 }}>
+            <button
+              onClick={() => setOpen((s) => (s === slug ? null : slug))}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, width: '100%', textAlign: 'left',
+                padding: '6px 8px', border: 'none', cursor: 'pointer',
+                background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+                color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-ui)', fontSize: 13
+              }}
+            >
+              <Icon name={expanded ? 'minimize' : 'expand'} />
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {slug}.md
+              </span>
+            </button>
+            {expanded && <DeliverableReader slug={slug} />}
+          </div>
+        );
+      })}
+    </Section>
+  );
+}
+
+/** Wraps the result/updates region and, on a non-empty text selection, floats a
+ *  "new task from selection" button next to the cursor. Clicking seeds the CREATE
+ *  form with the selected text + a back-reference, links the new task as depending
+ *  on this one, and opens create mode. The button stops mousedown propagation so
+ *  the wrapper's clear-on-mousedown doesn't kill it before the click lands. */
+function SelectionToTask({ task, children }: { task: { id: string; title: string }; children: React.ReactNode }) {
+  const setNewTaskSeed = useStore((s) => s.setNewTaskSeed);
+  const openTask = useStore((s) => s.openTask);
+  const ref = useRef<HTMLDivElement>(null);
+  const [pin, setPin] = useState<{ text: string; x: number; y: number } | null>(null);
+
+  const onMouseUp = (e: React.MouseEvent): void => {
+    const sel = window.getSelection()?.toString().trim() ?? '';
+    if (!sel) { setPin(null); return; }
+    const rect = ref.current?.getBoundingClientRect();
+    setPin({ text: sel, x: e.clientX - (rect?.left ?? 0), y: e.clientY - (rect?.top ?? 0) });
+  };
+
+  const create = (): void => {
+    if (!pin) return;
+    const description = `${pin.text}\n\n— from task "${task.title}" [task:${task.id}]`;
+    setNewTaskSeed({ description, dependsOn: [task.id] });
+    setPin(null);
+    openTask(NEW_TASK_ID);
+  };
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }} onMouseUp={onMouseUp} onMouseDown={() => setPin(null)}>
+      {children}
+      {pin && (
+        <button
+          onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+          onClick={create}
+          style={{
+            position: 'absolute', left: pin.x, top: pin.y + 10, zIndex: 20,
+            display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 8px',
+            border: 'none', cursor: 'pointer', whiteSpace: 'nowrap',
+            background: 'var(--cth-ink-900)', color: 'var(--cth-cream-100)',
+            fontFamily: 'var(--cth-font-display)', fontSize: 8, textTransform: 'uppercase',
+            boxShadow: '0 2px 6px rgba(0,0,0,0.3)'
+          }}
+        >
+          <Icon name="plus" /> new task from selection
+        </button>
+      )}
+    </div>
+  );
+}
 
 /**
  * The full-card view for a single task, opened from the Kanban board into the
@@ -24,23 +168,20 @@ import {
  */
 export function TaskDetailPanel() {
   const openTaskId = useStore((s) => s.openTaskId);
-  const openTaskMode = useStore((s) => s.openTaskMode);
   const openTask = useStore((s) => s.openTask);
+  const newTaskSeed = useStore((s) => s.newTaskSeed);
+  const setNewTaskSeed = useStore((s) => s.setNewTaskSeed);
   const agents = useStore((s) => s.agents);
   const {
     tasks,
-    dispatchMsg,
     missionFor,
     addTask,
-    moveTask,
     dispatchTask,
     archiveTask,
     deleteTask,
+    markTaskRead,
     saveEdit
   } = useTasks();
-
-  const [editing, setEditing] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // The sentinel id means "create a brand-new task" — there's no real task to find.
   const creating = openTaskId === NEW_TASK_ID;
@@ -55,10 +196,12 @@ export function TaskDetailPanel() {
     return () => window.removeEventListener('keydown', onKey);
   }, [openTask]);
 
-  // Reset the local confirm state and seed the edit toggle from the open mode
-  // whenever the open task changes — a board title-click (mode 'edit') lands
-  // straight in the form; the expand button (mode 'view') lands in the read view.
-  useEffect(() => { setEditing(openTaskMode === 'edit'); setConfirmDelete(false); }, [openTaskId, openTaskMode]);
+  // Opening a card marks it read (clears its NEW pill). markTaskRead no-ops when
+  // already read, so this won't loop; a new update arriving while the card is open
+  // re-flags it unread (updates.length changes) and this re-marks it once.
+  useEffect(() => {
+    if (task && isTaskUnread(task)) markTaskRead(task.id);
+  }, [task?.id, task?.updates?.length, task?.viewedAt, markTaskRead]);
 
   // Create mode — the spacious left panel hosts the new-task form (the board's
   // "add task" button opens this instead of an inline form). Submitting closes
@@ -89,6 +232,7 @@ export function TaskDetailPanel() {
           <AddTaskForm
             agents={agents}
             existing={tasks}
+            seed={newTaskSeed ?? undefined}
             onCancel={() => openTask(null)}
             onSubmit={(t, schedule) => { addTask(t, schedule); openTask(null); }}
             onCreateAndDispatch={(t, schedule) => { addTask(t, schedule); dispatchTask(t); openTask(null); }}
@@ -122,7 +266,7 @@ export function TaskDetailPanel() {
 
   const pr = Math.max(1, Math.min(5, task.priority));
   const updates = task.updates ?? [];
-  const canDispatch = task.status === 'todo' || task.status === 'blocked';
+  const deliverables = extractDeliverableSlugs(task);
   const statusCol = COLUMNS.find((c) => c.key === task.status);
   const mission = missionFor(task.id);
 
@@ -190,110 +334,32 @@ export function TaskDetailPanel() {
         </div>
       </div>
 
-      {/* Body — read view or in-place edit form */}
-      {editing ? (
-        <Scroll>
+      {/* Body — a single always-editable view in a two-pane column: the edit form
+          takes its natural height (caps at 60% and scrolls) while the update
+          history fills the rest and scrolls on its own. Keyed by task id so the
+          form re-seeds when a different task is opened. */}
+      <div style={bodyColumn}>
+        <div style={{ ...topPane, padding: 0 }}>
           <AddTaskForm
+            key={task.id}
             agents={agents}
             existing={tasks.filter((t) => t.id !== task.id)}
             initial={task}
             initialMission={mission}
-            onCancel={() => setEditing(false)}
-            onSubmit={(t, schedule) => { saveEdit(t, schedule); setEditing(false); }}
+            onCancel={() => openTask(null)}
+            onSubmit={(t, schedule) => saveEdit(t, schedule)}
             onDelete={() => { deleteTask(task.id); openTask(null); }}
             onArchive={() => { archiveTask(task.id); openTask(null); }}
+            onDispatch={() => dispatchTask(task)}
           />
-        </Scroll>
-      ) : (
-        <Scroll>
-          <Section title="DESCRIPTION">
-            {task.description?.trim()
-              ? <Markdown>{task.description}</Markdown>
-              : <Muted>No description.</Muted>}
-          </Section>
-
-          <Section title={`UPDATES (${updates.length})`}>
-            {updates.length === 0 && <Muted>No updates yet.</Muted>}
-            {updates.map((u, i) => (
-              <div key={i} style={{
-                marginBottom: 10, padding: 8,
-                background: 'var(--cth-paper-100)', boxShadow: `inset 0 0 0 1px ${UPDATE_COLOR[u.kind]}`
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                  <span style={{
-                    fontFamily: 'var(--cth-font-display)', fontSize: 8, textTransform: 'uppercase',
-                    color: UPDATE_COLOR[u.kind]
-                  }}>{u.kind}</span>
-                  <span style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
-                    {nameFor(u.by) ?? u.by}
-                    {u.ts ? ` · ${new Date(u.ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : ''}
-                  </span>
-                </div>
-                <Markdown>{u.text}</Markdown>
-              </div>
-            ))}
-          </Section>
-        </Scroll>
-      )}
-
-      {/* Action bar (hidden while the edit form owns the controls) */}
-      {!editing && (
-        <div style={{
-          flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
-          padding: '8px 12px', borderTop: '1px solid var(--cth-ink-300)', background: 'var(--cth-cream-100)'
-        }}>
-          <label style={{ fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-500)' }}>status</label>
-          <select
-            value={task.status}
-            onChange={(e) => moveTask(task.id, e.target.value as Status)}
-            style={{
-              padding: '3px 6px', background: 'var(--cth-paper-100)', border: 'none',
-              boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)', fontFamily: 'var(--cth-font-ui)',
-              fontSize: 12, color: 'var(--cth-ink-900)', cursor: 'pointer'
-            }}
-          >
-            {COLUMNS.map((c) => (<option key={c.key} value={c.key}>{c.label.toLowerCase()}</option>))}
-          </select>
-          {canDispatch && (
-            <PixelButton variant="primary" size="sm" onClick={() => dispatchTask(task)}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                <Icon name="arrow-right" /> dispatch
-              </span>
-            </PixelButton>
-          )}
-          <PixelButton variant="secondary" size="sm" onClick={() => setEditing(true)}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-              <Icon name="gear" /> edit
-            </span>
-          </PixelButton>
-          {dispatchMsg && <span style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>{dispatchMsg}</span>}
-          <button
-            onClick={() => { archiveTask(task.id); openTask(null); }}
-            title="Archive (file it away — restorable from the ARCHIVED section)"
-            style={{
-              marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4,
-              padding: '3px 9px 2px', border: 'none', cursor: 'pointer',
-              background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
-              fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-900)'
-            }}
-          ><Icon name="folder" /> archive</button>
-          <button
-            onClick={() => {
-              if (confirmDelete) { deleteTask(task.id); openTask(null); }
-              else setConfirmDelete(true);
-            }}
-            onBlur={() => setConfirmDelete(false)}
-            title="Delete this task"
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 4,
-              padding: '3px 9px 2px', border: 'none', cursor: 'pointer',
-              background: confirmDelete ? 'var(--cth-coral)' : 'var(--cth-cream-200)',
-              boxShadow: `inset 0 0 0 1px ${confirmDelete ? 'var(--cth-ink-900)' : 'var(--cth-ink-700)'}`,
-              fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-900)'
-            }}
-          ><Icon name="x" /> {confirmDelete ? 'confirm delete' : 'delete'}</button>
         </div>
-      )}
+        <div style={bottomPane}>
+          <SelectionToTask task={task}>
+            <Deliverables slugs={deliverables} />
+            <TaskUpdates updates={updates} nameFor={nameFor} />
+          </SelectionToTask>
+        </div>
+      </div>
     </div>
   );
 }
@@ -302,4 +368,17 @@ const emptyWrap: React.CSSProperties = {
   height: '100%', display: 'flex', flexDirection: 'column',
   justifyContent: 'center', alignItems: 'center', gap: 12, padding: 16,
   background: 'var(--cth-paper-200)'
+};
+
+// Two-pane body: top pane (form/description) sits above the update history.
+const bodyColumn: React.CSSProperties = {
+  flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--cth-paper-200)'
+};
+// Natural height, but caps at 60% and scrolls so it never starves the history.
+const topPane: React.CSSProperties = {
+  flex: '0 1 auto', minHeight: 0, maxHeight: '60%', overflowY: 'auto'
+};
+// Fills the remaining height and scrolls independently.
+const bottomPane: React.CSSProperties = {
+  flex: '1 1 0', minHeight: 0, overflowY: 'auto', padding: '0 10px 10px'
 };

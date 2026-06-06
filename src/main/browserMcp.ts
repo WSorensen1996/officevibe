@@ -1,18 +1,19 @@
 /**
- * In-process MCP server that gives the god agent live control of the embedded
- * browser pane (a `WebContentsView` in the main window).
+ * In-process MCP server that gives EVERY agent live control of its OWN embedded
+ * browser view (a `WebContentsView` in the main window).
  *
  * Design notes:
- *  - It speaks MCP over a localhost-only Streamable-HTTP endpoint, authenticated
- *    by a per-run token, so only a process that was handed the token (the agent's
- *    generated mcp.json — see hive.ts) can drive the browser.
+ *  - It speaks MCP over a localhost-only Streamable-HTTP endpoint. Each agent is
+ *    handed a DISTINCT per-agent token in its generated mcp.json (see project.ts);
+ *    the request's `x-agent-token` header is resolved to that agent's browsing
+ *    context, so one server multiplexes all agents and an unknown token is 401'd.
  *  - It drives the page with *stable* webContents APIs (`executeJavaScript` +
  *    `capturePage`) rather than attaching the Chrome DevTools Protocol debugger.
  *    That sidesteps the whole class of "DevTools detaches our CDP session" /
  *    target-selection problems and keeps this purely additive to the app.
- *  - Because it lives in the main process it holds a direct reference to the one
- *    embedded view, so the user watches every navigation/click happen live in the
- *    bottom-left pane (and can take over by clicking it).
+ *  - Because it lives in the main process it holds a direct reference to each
+ *    agent's view, so the user watches the on-stage agent's navigation/clicks
+ *    happen live in the bottom-left pane (and can take over by clicking it).
  *
  * Trade-off: JS-dispatched clicks/keystrokes are `isTrusted:false`. That is fine
  * for the overwhelming majority of sites; the documented fidelity upgrade is to
@@ -20,24 +21,33 @@
  * events. Everything else (navigate, snapshot, read, screenshot) is unaffected.
  */
 import { createServer, type IncomingMessage, type ServerResponse, type Server as HttpServer } from 'node:http';
-import { randomBytes } from 'node:crypto';
 import type { WebContents } from 'electron';
 import { z } from 'zod';
 
 export interface BrowserMcpHandle {
-  /** `http://127.0.0.1:<port>/mcp` — written into the agent's mcp.json. */
+  /** `http://127.0.0.1:<port>/mcp` — written into each agent's mcp.json. */
   url: string;
-  /** Shared secret the agent sends as the `x-agent-token` header. */
-  token: string;
   /** Stop the HTTP listener. Best-effort; safe to call when already stopped. */
   stop(): void;
 }
 
-export interface BrowserMcpDeps {
-  /** Create the WebContentsView if it doesn't exist yet (idempotent). */
+/** One agent's browsing context: its (lazily-created) view + a getter for the
+ *  live webContents. Returned by {@link BrowserMcpDeps.resolve}. */
+export interface BrowserContext {
+  /** Create this agent's WebContentsView if it doesn't exist yet (idempotent). */
   ensureView: () => void;
-  /** The live page's webContents, or null if the pane isn't up. */
+  /** This agent's live page webContents, or null if its view isn't up. */
   getWebContents: () => WebContents | null;
+  /** Capture a PNG of this agent's page as base64 — works even when the view is
+   *  parked offscreen (briefly stages it to force a paint if a direct capture is
+   *  blank). Returns '' on failure. */
+  capture: () => Promise<string>;
+}
+
+export interface BrowserMcpDeps {
+  /** Resolve the agent identified by the request's `x-agent-token` to its
+   *  browsing context, or null if the token is unknown (→ 401 / tool error). */
+  resolve: (token: string) => BrowserContext | null;
 }
 
 interface SnapshotElement {
@@ -144,15 +154,21 @@ function toHttpUrl(raw: unknown): string | null {
   return /^https?$/i.test(scheme[1]) ? s : null;
 }
 
-/** Register the browser_* tools on a fresh McpServer instance. */
-function registerTools(server: { registerTool: (...a: unknown[]) => unknown }, deps: BrowserMcpDeps): void {
+/** Register the browser_* tools on a fresh McpServer instance, bound to the
+ *  agent identified by `token` (resolved per request via deps.resolve). */
+function registerTools(server: { registerTool: (...a: unknown[]) => unknown }, deps: BrowserMcpDeps, token: string): void {
   const reg = server.registerTool.bind(server) as (
     name: string,
     cfg: { description: string; inputSchema?: Record<string, unknown> },
     cb: (args: Record<string, unknown>) => Promise<unknown>
   ) => unknown;
 
-  const wc = (): WebContents | null => { deps.ensureView(); return deps.getWebContents(); };
+  const wc = (): WebContents | null => {
+    const ctx = deps.resolve(token);
+    if (!ctx) return null;
+    ctx.ensureView();
+    return ctx.getWebContents();
+  };
 
   reg('browser_navigate',
     { description: 'Navigate the shared browser pane to a URL. The user watches this happen live in the app.',
@@ -205,12 +221,12 @@ function registerTools(server: { registerTool: (...a: unknown[]) => unknown }, d
     });
 
   reg('browser_screenshot',
-    { description: 'Capture a screenshot of the current browser pane so you can see what the user sees.' },
+    { description: 'Capture a screenshot of your browser page so you can see what is on screen. Works even when another agent is the one being watched in the pane.' },
     async () => {
-      const w = wc(); if (!w) return err('Browser pane is not ready yet.');
-      const img = await w.capturePage();
-      const data = img.toPNG().toString('base64');
-      if (!data) return err('Screenshot was empty (the pane may be hidden behind a dialog).');
+      const ctx = deps.resolve(token); if (!ctx) return err('Browser is not provisioned for this agent.');
+      ctx.ensureView();
+      const data = await ctx.capture();
+      if (!data) return err('Screenshot was empty (the page may not have painted yet — try browser_wait then retry).');
       return { content: [{ type: 'image', data, mimeType: 'image/png' }] } as unknown as TextResult;
     });
 
@@ -249,19 +265,18 @@ function readBody(req: IncomingMessage): Promise<unknown> {
 }
 
 /**
- * Start the browser MCP server on an ephemeral localhost port. Returns the URL +
- * token the spawner threads into the god agent's mcp.json. The SDK is ESM-only,
- * so it's pulled in via dynamic import (works from the CJS main bundle).
+ * Start the browser MCP server on an ephemeral localhost port. Returns the URL
+ * the spawner writes into every agent's mcp.json (each with its OWN per-agent
+ * `x-agent-token`; the request token is resolved via deps.resolve). The SDK is
+ * ESM-only, so it's pulled in via dynamic import (works from the CJS main bundle).
  */
 export async function startBrowserMcp(deps: BrowserMcpDeps): Promise<BrowserMcpHandle> {
   const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
   const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
 
-  const token = randomBytes(24).toString('hex');
-
-  const makeServer = (): InstanceType<typeof McpServer> => {
+  const makeServer = (token: string): InstanceType<typeof McpServer> => {
     const server = new McpServer({ name: 'officevibe-browser', version: '0.1.0' }, { capabilities: { tools: {} } });
-    registerTools(server as unknown as { registerTool: (...a: unknown[]) => unknown }, deps);
+    registerTools(server as unknown as { registerTool: (...a: unknown[]) => unknown }, deps, token);
     return server;
   };
 
@@ -276,7 +291,9 @@ export async function startBrowserMcp(deps: BrowserMcpDeps): Promise<BrowserMcpH
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!(req.url ?? '').startsWith('/mcp')) { res.writeHead(404).end(); return; }
-    if (req.headers['x-agent-token'] !== token) {
+    const token = typeof req.headers['x-agent-token'] === 'string' ? req.headers['x-agent-token'] : '';
+    // Per-agent auth: the token must resolve to a live agent browsing context.
+    if (!token || !deps.resolve(token)) {
       res.writeHead(401, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'unauthorized' } }));
       return;
@@ -288,7 +305,7 @@ export async function startBrowserMcp(deps: BrowserMcpDeps): Promise<BrowserMcpH
       return;
     }
     const body = await readBody(req);
-    const server = makeServer();
+    const server = makeServer(token);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => { try { void transport.close(); } catch { /* noop */ } try { void server.close(); } catch { /* noop */ } });
     await server.connect(transport);
@@ -301,7 +318,6 @@ export async function startBrowserMcp(deps: BrowserMcpDeps): Promise<BrowserMcpH
 
   return {
     url: `http://127.0.0.1:${port}/mcp`,
-    token,
     stop() { try { httpServer.close(); } catch { /* noop */ } }
   };
 }

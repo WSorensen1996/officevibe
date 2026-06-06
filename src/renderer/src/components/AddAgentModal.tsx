@@ -6,7 +6,7 @@ import { Icon } from './Icon';
 import { useStore, type Agent } from '@/store/store';
 import { OFFICE_CAST, DEFAULT_CHARACTER, type OfficeCharacterName } from '@/scene/office/cast';
 import { type AccentColorName } from '@/design/tokens';
-import { type HarnessConfig, buildSpawnCommand, AGENT_MODELS } from '@/store/config';
+import { type HarnessConfig, type EffortLevel, buildSpawnCommand, AGENT_MODELS, AGENT_EFFORTS } from '@/store/config';
 
 const ACCENTS: AccentColorName[] = ['coral', 'mint', 'sky', 'lemon', 'lilac', 'peach'];
 
@@ -25,20 +25,36 @@ export interface AddAgentModalProps {
 
 export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
   const addAgent = useStore(s => s.addAgent);
+  const agents = useStore(s => s.agents);
 
   const [name, setName] = useState('Jim');
   const [character, setCharacter] = useState<OfficeCharacterName>(DEFAULT_CHARACTER);
   const [accent, setAccent] = useState<AccentColorName>('sky');
-  const [cwd, setCwd] = useState<string>(config.registeredRepos[0] ?? '');
+  // Default the folder to the one other agents already run in, so adding a
+  // second/third agent lands in the same project without re-picking. We take
+  // the most recently added "peer" agent — skipping the orchestrator (isGod)
+  // and its assistant (isAssistant), whose cwd is the data root, not a code
+  // folder, and skipping archived agents. Falls back to a registered repo,
+  // then empty (the original behavior).
+  const defaultCwd =
+    [...agents].reverse().find(a => !a.isGod && !a.isAssistant && !a.archived && a.cwd)?.cwd
+    ?? config.registeredRepos[0]
+    ?? '';
+  const [cwd, setCwd] = useState<string>(defaultCwd);
   const [model, setModel] = useState<string | undefined>(config.defaultModel);
-  const [command, setCommand] = useState(buildSpawnCommand(config, config.defaultModel));
+  const [effort, setEffort] = useState<EffortLevel | undefined>(config.defaultEffort);
+  const [command, setCommand] = useState(buildSpawnCommand(config, config.defaultModel, config.defaultEffort));
   const [description, setDescription] = useState('a fresh harness');
 
-  // Picking a model rebuilds the command; the command field stays editable for
-  // power users (it's the source of truth for the actual spawn).
+  // Picking a model/effort rebuilds the command; the command field stays editable
+  // for power users (it's the source of truth for the actual spawn).
   const pickModel = (id?: string) => {
     setModel(id);
-    setCommand(buildSpawnCommand(config, id));
+    setCommand(buildSpawnCommand(config, id, effort));
+  };
+  const pickEffort = (level?: EffortLevel) => {
+    setEffort(level);
+    setCommand(buildSpawnCommand(config, model, level));
   };
   const [goal, setGoal] = useState('');
   const [isolate, setIsolate] = useState(false);
@@ -104,6 +120,7 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
       ptyId,
       command: command.trim(),
       model,
+      effort,
       recentTextTs: Date.now()
     };
     addAgent(agent);
@@ -207,6 +224,38 @@ export function AddAgentModal({ onClose, config }: AddAgentModalProps) {
               <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: 4 }}>
                 <strong>default</strong> uses your subscription's model. ⚠ marks models that
                 override it and may cost extra if not in your plan.
+              </div>
+            </Row>
+
+            <Row label="Effort">
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {AGENT_EFFORTS.map((e) => {
+                  const active = (effort ?? '') === (e.id ?? '');
+                  return (
+                    <button
+                      key={e.label}
+                      onClick={() => pickEffort(e.id)}
+                      title={e.opus
+                        ? `${e.id} — best on Opus-tier models`
+                        : (e.id ?? "Claude Code's default effort")}
+                      style={{
+                        padding: '3px 8px 1px',
+                        background: active ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
+                        boxShadow: active
+                          ? 'inset 0 0 0 2px var(--cth-ink-900)'
+                          : 'inset 0 0 0 1px var(--cth-ink-700)',
+                        fontFamily: 'var(--cth-font-ui)', fontSize: 13,
+                        color: 'var(--cth-ink-900)', cursor: 'pointer', border: 'none'
+                      }}
+                    >
+                      {e.label}{e.opus ? ' ⚠' : ''}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: 4 }}>
+                How hard this agent thinks. <strong>default</strong> keeps Claude Code's own
+                setting. ⚠ X-High / Max are best on Opus-tier models.
               </div>
             </Row>
 

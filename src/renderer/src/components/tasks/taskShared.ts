@@ -29,12 +29,31 @@ export interface ProjectTask {
   /** ISO of the last status change — stamped on a manual move/edit so the
    *  main-process merge keeps whichever of human/agent changed status last. */
   statusUpdatedAt?: string;
+  /** ISO of the last UI dispatch — hides the dispatch button until the task's
+   *  status next changes (re-nudgeable when blocked). */
+  dispatchedAt?: string;
   /** Human-set: hidden from the 4 columns and shown in the ARCHIVED section.
    *  Independent of `status`, so restoring returns the card to its column. */
   archived?: boolean;
+  /** ISO of the last time the human opened this card's full view. Drives the
+   *  unread/"just finished" indicator: any update newer than this is unread.
+   *  Round-trips via the writeTasks `...t` spread + the parseTasks whitelist. */
+  viewedAt?: string;
 }
 
 export type Status = ProjectTask['status'];
+
+/** Whether the dispatch button should show. Dispatchable columns only
+ *  (todo/blocked), and hidden once dispatched until the task's status changes
+ *  again — so a freshly dispatched card can't be re-dispatched, but a stuck or
+ *  blocked one stays re-nudgeable. ISO-8601 UTC strings compare chronologically
+ *  as plain strings (same convention the writeTasks merge relies on). */
+export function canDispatchTask(task: ProjectTask): boolean {
+  if (task.status !== 'todo' && task.status !== 'blocked') return false;
+  const dispatched = !!task.dispatchedAt
+    && (!task.statusUpdatedAt || task.statusUpdatedAt <= task.dispatchedAt);
+  return !dispatched;
+}
 
 export const COLUMNS: { key: Status; label: string; accent: string }[] = [
   { key: 'todo',    label: 'TODO',    accent: 'var(--cth-sky)' },
@@ -126,6 +145,36 @@ export function parseUpdates(raw: unknown): TaskUpdate[] | undefined {
   return out.length ? out.slice(-20) : undefined;
 }
 
+/** Whether a task has agent activity the human hasn't seen yet: it has at least
+ *  one update whose timestamp is newer than the last time the card was opened
+ *  (`viewedAt`). Covers "just finished" (a fresh `done` update) and any progress
+ *  note since the last view. ISO strings compare chronologically as plain strings
+ *  (the same convention writeTasks/canDispatchTask rely on). */
+export function isTaskUnread(task: ProjectTask): boolean {
+  const ups = task.updates ?? [];
+  if (ups.length === 0) return false;
+  const newest = ups[ups.length - 1].ts ?? '';
+  return newest > (task.viewedAt ?? '');
+}
+
+/** Knowledge deliverables this task references — the bare `knowledge/<file>.md`
+ *  paths the agent named in the description or any update. Returns slugs (filename
+ *  without `.md`), de-duped in first-seen order, for the RESULT section to load via
+ *  `knowledgeGet()`. Text-based by design: a deliverable the agent never named in an
+ *  update won't be detected (acceptable — agents cite the file they wrote). */
+export function extractDeliverableSlugs(task: ProjectTask): string[] {
+  const haystack = [task.description ?? '', ...(task.updates ?? []).map((u) => u.text)].join('\n');
+  const re = /knowledge\/([\w.-]+)\.md\b/gi;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(haystack)) !== null) {
+    const slug = m[1].toLowerCase();
+    if (!seen.has(slug)) { seen.add(slug); out.push(slug); }
+  }
+  return out;
+}
+
 /** Normalize whatever hive:tasks returns into a typed task array. */
 export function parseTasks(raw: unknown): ProjectTask[] {
   const list = (raw && typeof raw === 'object' && Array.isArray((raw as { tasks?: unknown }).tasks))
@@ -147,7 +196,10 @@ export function parseTasks(raw: unknown): ProjectTask[] {
       createdAt: typeof t.createdAt === 'string' ? t.createdAt : new Date().toISOString(),
       updates: parseUpdates(t.updates),
       statusUpdatedAt: typeof t.statusUpdatedAt === 'string' ? t.statusUpdatedAt : undefined,
+      dispatchedAt: typeof t.dispatchedAt === 'string' ? t.dispatchedAt : undefined,
       // Load-bearing: drop this on poll and the next human persist() un-archives.
-      archived: t.archived === true ? true : undefined
+      archived: t.archived === true ? true : undefined,
+      // Load-bearing: drop this on poll and the unread indicator never settles.
+      viewedAt: typeof t.viewedAt === 'string' ? t.viewedAt : undefined
     }));
 }

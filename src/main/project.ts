@@ -18,7 +18,7 @@
  */
 import {
   existsSync, mkdirSync, readFileSync, writeFileSync, renameSync,
-  readdirSync, rmSync, appendFileSync
+  readdirSync, rmSync, appendFileSync, statSync
 } from 'node:fs';
 import { join } from 'node:path';
 import { deriveProjectName, readConfig } from './config';
@@ -42,6 +42,17 @@ export interface ProjectMessage {
   requires_reply: boolean;
   needs_human: boolean;
   created_at: string;
+}
+
+/** One natural-language utterance an agent produced during a turn — "what it said".
+ *  Captured from the Claude Code transcript on the Stop hook and stored OUTSIDE the
+ *  inbox (see `recordSpoken`), so it can be shown in the Messages tab without the
+ *  agent ever reading its own monologue as incoming mail. */
+export interface AgentSay {
+  id: string;     // `${stamp()}-${shortRand()}` — sortable, matches the message-id style
+  ts: string;     // ISO timestamp
+  text: string;   // the turn's text blocks, joined (length-capped to SAY_CAP)
+  turn: string;   // the transcript entry uuid this came from (per-turn grouping)
 }
 
 /** A short status note an agent posts onto a task (the human's board TLDR).
@@ -69,9 +80,16 @@ export interface ProjectTask {
   /** ISO of the last status change — recency tiebreaker so a stale wholesale
    *  renderer overwrite can't revert a fresher agent auto-move (and vice-versa). */
   statusUpdatedAt?: string;
+  /** ISO of the last UI dispatch — hides the dispatch button until the task's
+   *  status next changes (re-nudgeable when blocked). */
+  dispatchedAt?: string;
   /** Human-set: hide from the board's 4 columns and collect in the ARCHIVED
    *  section. Orthogonal to `status` — round-trips via the writeTasks `...t` spread. */
   archived?: boolean;
+  /** ISO of the last time the human opened this card's full view — drives the
+   *  unread/"just finished" indicator. Renderer-owned: round-trips via the
+   *  writeTasks `...t` spread and is untouched by appendTaskUpdate. */
+  viewedAt?: string;
 }
 
 export interface AgentMeta {
@@ -126,6 +144,22 @@ export interface UsageLimits {
 
 const HOP_CAP = 12;
 
+/** One parsed line of a Claude Code transcript (JSONL). Only the fields we read are
+ *  typed; the on-disk shape (and the `uuid` cursor key) is verified empirically by the
+ *  repo's own transcript parser (see transcript.ts / readAgentUsage). */
+interface TranscriptEntry {
+  type?: string;
+  uuid?: string;
+  message?: { content?: Array<{ type?: string; text?: string }> };
+}
+
+/** Per-utterance text cap, and a defensive ceiling on transcript size we'll read in
+ *  full inside the Stop hook (beyond it we read only the trailing window — the shim
+ *  self-kills after 5s, so a multi-MB synchronous read must stay bounded). */
+const SAY_CAP = 4000;
+const MAX_TRANSCRIPT_BYTES = 50 * 1024 * 1024;
+const TRANSCRIPT_TAIL_BYTES = 1 * 1024 * 1024;
+
 /** Filesystem- and sort-safe timestamp, e.g. 2026-05-30T14-03-11-123Z. */
 function stamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-');
@@ -146,19 +180,28 @@ export class ProjectManager {
    */
   constructor(
     private getHome: () => string | null,
-    private emit?: (channel: string, payload: unknown) => void
+    private emit?: (channel: string, payload: unknown) => void,
+    /** Called synchronously inside ensureAgent (before spawn) with each agent's
+     *  minted browser token, so the main process can map token → agentId for the
+     *  shared browser MCP server's per-request resolver. */
+    private onBrowserToken?: (agentId: string, token: string) => void
   ) {}
 
   private routerTimer: NodeJS.Timeout | null = null;
 
-  /** Endpoint of the in-process browser MCP server (set by the main process once
-   *  it's listening). When set, the GOD agent is spawned with a --mcp-config that
-   *  points at it, giving Michael live control of the embedded browser pane. */
-  private browserEndpoint: { url: string; token: string } | null = null;
+  /** URL of the in-process browser MCP server (set by the main process once it's
+   *  listening). When set, EVERY agent is spawned with a --mcp-config pointing at
+   *  it (each with its own per-agent token), giving every agent live control of
+   *  its own embedded browser view. */
+  private browserEndpoint: { url: string } | null = null;
 
-  /** Record the browser MCP endpoint so the next god spawn injects it. */
-  setBrowserEndpoint(url: string, token: string): void {
-    this.browserEndpoint = { url, token };
+  /** Per-agent browser token (memoized so a respawn under the same id reuses the
+   *  same token — keeps the main process's token→agentId map stable). */
+  private agentBrowserTokens = new Map<string, string>();
+
+  /** Record the browser MCP endpoint so subsequent spawns inject it. */
+  setBrowserEndpoint(url: string): void {
+    this.browserEndpoint = { url };
   }
 
   // — paths —
@@ -231,6 +274,11 @@ export class ProjectManager {
     const log = join(root, 'log.jsonl');
     if (!existsSync(log)) writeFileSync(log, '', 'utf8');
 
+    // Knowledge ("Project Brain") scaffold — the team-shared skill library. Created
+    // here so the spawn's `--add-dir <root>/knowledge` always points at an existing dir.
+    mkdirSync(join(root, 'knowledge', '.claude', 'skills'), { recursive: true });
+    mkdirSync(join(root, 'knowledge', 'proposals', '.done'), { recursive: true });
+
     // The hook shim: a dumb pipe between a `claude` hook and our UDS. The usage
     // shim: a `statusLine` command that records Claude's 5h/7d limit usage.
     // Both refreshed on every bootstrap so they track code changes.
@@ -252,7 +300,7 @@ export class ProjectManager {
    * Ensure an agent's workspace + registry entry, returning the spawn injection
    * (extra `claude` args + env) that makes the process hive-aware.
    */
-  ensureAgent(meta: AgentMeta, opts: { semanticMemory?: boolean } = {}): SpawnInjection {
+  ensureAgent(meta: AgentMeta, opts: { semanticMemory?: boolean; knowledge?: boolean } = {}): SpawnInjection {
     const root = this.root();
     if (!root) return { args: [], env: {} };
     this.ensureProject();
@@ -293,23 +341,45 @@ export class ProjectManager {
       PROJECT_ROOT: root,
       AGENT_DIR: dir
     };
-    const args = ['--append-system-prompt', this.injectedPrompt(meta, dir, root, opts.semanticMemory ?? false)];
+    const args = ['--append-system-prompt', this.injectedPrompt(meta, dir, root, opts.semanticMemory ?? false, opts.knowledge ?? false)];
+
+    // Self-improvement: expose the team-shared skill library to this agent. `--add-dir`
+    // makes Claude Code auto-discover <root>/knowledge/.claude/skills (verified via smoke
+    // test); KNOWLEDGE_DIR lets the agent read a skill's full text on demand.
+    if (opts.knowledge) {
+      const kdir = join(root, 'knowledge');
+      env.KNOWLEDGE_DIR = kdir;
+      args.push('--add-dir', kdir);
+    }
 
     // Resolve which MCP servers this agent receives: the user-configured servers in
-    // scope (every agent for scope 'all'; only the god for scope 'god') plus, for the
-    // god, the built-in browser server. `grantedNames` feeds the permission allow-rules
-    // in hookSettings below (bypassPermissions alone does NOT expose MCP tools); the
-    // merged `mcpServers` map is written to mcp.json.
+    // scope (every agent for scope 'all'; only the god for scope 'god') plus the
+    // built-in browser server — now given to EVERY agent so web/browser tasks are
+    // delegable, each with its OWN per-agent token. `grantedNames` feeds the
+    // permission allow-rules in hookSettings below (bypassPermissions alone does NOT
+    // expose MCP tools); the merged `mcpServers` map is written to mcp.json.
     const { servers: userServers, names: userNames } = mcpServersForAgent(readConfig().mcpServers, !!meta.isGod);
     const mcpServers: Record<string, unknown> = { ...userServers };
     const grantedNames = [...userNames];
-    if (meta.isGod && this.browserEndpoint) {
+    if (this.browserEndpoint) {
+      // Mint (or reuse) this agent's browser token and register it with the main
+      // process BEFORE the PTY spawns, so the MCP resolver can route the agent's
+      // first browser tool call to its own view.
+      // NOTE (trust model): the token is written into agents/<id>/mcp.json, which
+      // sibling agents can read — so the per-agent browser is an isolation boundary
+      // for SESSIONS/logins (separate partitions), not a hard security boundary
+      // against a malicious peer. All agents here are trusted local Claude processes
+      // sharing one OS user (same model as before, when the god's token lived in its
+      // own mcp.json). Hardening to a per-agent UDS/port is possible if that changes.
+      let tok = this.agentBrowserTokens.get(meta.id);
+      if (!tok) { tok = randomBytes(24).toString('hex'); this.agentBrowserTokens.set(meta.id, tok); }
       mcpServers.browser = {
         type: 'http',
         url: this.browserEndpoint.url,
-        headers: { 'x-agent-token': this.browserEndpoint.token }
+        headers: { 'x-agent-token': tok }
       };
       grantedNames.push('browser');
+      try { this.onBrowserToken?.(meta.id, tok); } catch (e) { console.error('[browser] onBrowserToken failed:', e); }
     }
 
     // Phase 1 — autonomy: attach lifecycle hooks via --settings (no edits to the
@@ -362,15 +432,17 @@ export class ProjectManager {
    *  than what's wired in. */
   private hookSettings(shim: string, mcpNames: string[] = []): unknown {
     const cmd = `node "${shim}"`;
-    const entry = (matcher?: string) => ({
+    const entry = (matcher?: string, timeout?: number) => ({
       ...(matcher ? { matcher } : {}),
-      hooks: [{ type: 'command', command: cmd }]
+      hooks: [{ type: 'command', command: cmd, ...(timeout ? { timeout } : {}) }]
     });
     const settings: Record<string, unknown> = {
       hooks: {
         Stop: [entry()],
         SubagentStop: [entry()],
-        PreToolUse: [entry('*')],
+        // PreToolUse drives the approval card; give the human time to answer before
+        // Claude's hook timeout fires (default 600s) and falls through to the TUI.
+        PreToolUse: [entry('*', PRETOOL_HOOK_TIMEOUT_SEC)],
         PostToolUse: [entry('*')],
         UserPromptSubmit: [entry()],
         Notification: [entry()],
@@ -433,6 +505,89 @@ export class ProjectManager {
     return { block: true, reason };
   }
 
+  /**
+   * Capture the agent's natural-language output ("what it said") for the just-finished
+   * turn, from the Claude Code transcript at `transcriptPath` (provided by the Stop hook).
+   * Reads assistant `text` blocks appended since this agent's `lastSpokenUuid` cursor,
+   * appends them to `agents/<id>/says.jsonl`, advances the cursor, and returns the new
+   * utterances so the caller can emit a renderer event.
+   *
+   * Deliberately stores OUTSIDE the inbox: the inbox drives the autonomous Stop loop
+   * (drainForStop) and agents read every inbox file as incoming mail — writing an agent's
+   * own monologue there would loop forever and confuse the agent. Words only: `thinking`
+   * and `tool_use` blocks are excluded. Fast + synchronous + never throws — it runs inside
+   * the hook handler and the shim self-kills after 5s.
+   */
+  recordSpoken(agentId: string, transcriptPath: string | undefined): AgentSay[] {
+    try {
+      if (!transcriptPath || !existsSync(transcriptPath)) return [];
+      const dir = this.agentDir(agentId);
+      if (!existsSync(dir)) return [];
+
+      // Bound the synchronous read: parse the whole file normally, but for a
+      // pathologically large transcript read only the trailing window. The cursor still
+      // prevents dupes; worst case we miss very old prose on a first-ever giant capture.
+      let raw: string;
+      try {
+        const size = statSync(transcriptPath).size;
+        if (size > MAX_TRANSCRIPT_BYTES) {
+          const fd = readFileSync(transcriptPath);
+          raw = fd.subarray(fd.length - TRANSCRIPT_TAIL_BYTES).toString('utf8');
+        } else {
+          raw = readFileSync(transcriptPath, 'utf8');
+        }
+      } catch { return []; }
+
+      const cursorPath = join(dir, 'cursor.json');
+      const cursor = this.readJson<{ lastProcessed: string | null; lastSpokenUuid?: string | null }>(
+        cursorPath, { lastProcessed: null, lastSpokenUuid: null }
+      );
+
+      const out: AgentSay[] = [];
+      let started = !cursor.lastSpokenUuid;          // no cursor → take everything
+      let lastUuid: string | null = cursor.lastSpokenUuid ?? null;
+
+      for (const line of raw.split('\n')) {
+        const t = line.trim();
+        if (!t) continue;
+        let rec: TranscriptEntry;
+        try { rec = JSON.parse(t) as TranscriptEntry; } catch { continue; }
+        const uuid = typeof rec.uuid === 'string' ? rec.uuid : undefined;
+        // Fast-forward past everything up to and including the cursor entry.
+        if (!started) { if (uuid && uuid === cursor.lastSpokenUuid) started = true; continue; }
+        if (uuid) lastUuid = uuid;                   // advance past every entry (even tool-only)
+        if (rec.type !== 'assistant' || !Array.isArray(rec.message?.content)) continue;
+        const text = rec.message!.content!
+          .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+          .map((b) => (b.text as string).trim())
+          .filter(Boolean)
+          .join('\n\n');                             // join this turn's text blocks
+        if (!text) continue;                         // tool/thinking-only turn → nothing said
+        out.push({
+          id: `${stamp()}-${shortRand()}`,
+          ts: new Date().toISOString(),
+          text: text.slice(0, SAY_CAP),
+          turn: uuid ?? ''
+        });
+      }
+
+      // Advance the cursor even when nothing was said, so handled lines aren't re-scanned.
+      if (lastUuid && lastUuid !== (cursor.lastSpokenUuid ?? null)) {
+        this.writeJson(cursorPath, { ...cursor, lastSpokenUuid: lastUuid });
+      }
+      if (out.length === 0) return [];
+      appendFileSync(
+        join(dir, 'says.jsonl'),
+        out.map((s) => JSON.stringify(s)).join('\n') + '\n',
+        'utf8'
+      );
+      this.appendLog({ kind: 'said', agentId, count: out.length });
+      return out;
+    } catch {
+      return []; // best-effort — never crash the Stop hook
+    }
+  }
+
   // — agent-facing text —
 
   private identityText(meta: AgentMeta): string {
@@ -448,15 +603,21 @@ export class ProjectManager {
     ].filter(Boolean).join('\n');
   }
 
-  private injectedPrompt(meta: AgentMeta, dir: string, root: string, semanticMemory: boolean): string {
+  private injectedPrompt(meta: AgentMeta, dir: string, root: string, semanticMemory: boolean, knowledge: boolean): string {
+    const skillsLine = knowledge
+      ? '6. The team shares a growing SKILL library — reusable how-to for THIS project. At the START of a task you may receive a "RELEVANT PROJECT SKILLS" note; consult it and read a skill\'s full text from $KNOWLEDGE_DIR/.claude/skills/<slug>/SKILL.md before reinventing it. At the END of a task, if you discovered a REUSABLE procedure future tasks will repeat, capture it: write ONE JSON file into your outbox shaped {"type":"skill-proposal","slug":"kebab-name","title":"short title","description":"<=80 chars on what it does","tags":["topic"],"body":"# Title\\nstep-by-step procedure + gotchas"}. Reusable know-how only — one-off facts still go in memory.md.'
+      : '';
     const memoryLine = semanticMemory
       ? 'Semantic memory: the whole team shares a searchable MemPalace at $MEMPALACE_PALACE_PATH. To recall relevant past knowledge across the team, run `mempalace search "<query>"`; run `mempalace wake-up` at the start of a task for a memory digest. Your notes in memory.md are mined into the palace automatically — write durable facts there.'
       : '';
     const godLine = meta.isGod
-      ? 'You are the GOD / ORCHESTRATOR of this project — your job is to ORCHESTRATE, not to implement: maintain live situational awareness and delegate the work. (1) AWARENESS — always know what is going on: keep an accurate picture of every agent (active vs archived/idle), the task board, and all in-flight work; drain your inbox continually and triage every other agent\'s requests, answering clarifications so the team runs autonomously. (2) DELEGATE — decompose work and fan it out to the project agents via their inboxes (route messages and assign owners; do not do their jobs); do NOT take on grunt implementation yourself. (3) OWN ONLY THE IMPORTANT, high-leverage things — task decomposition, dispatch decisions, sign-offs, conflict resolution, branch integration, and final QA — and remain the sole scribe of board.md. You are otherwise fully autonomous — there is NO separate approval queue. For the genuinely critical (destructive actions, spending real money, scope changes, unresolvable conflicts), ask the human directly in your own session and let the tool-permission prompt gate the action; the human approves natively, including remotely from their phone via /remote-control. Keep the team unblocked. LIVE BROWSER: you alone control the embedded browser pane the user watches in the bottom-left of the app. Use your mcp__browser__* tools (browser_navigate, browser_snapshot, browser_click, browser_type, browser_read_text, browser_screenshot) to do web research and actions yourself — call browser_snapshot to see the page\'s clickable elements (each has a ref) before clicking/typing. Other agents route web tasks to you.'
+      ? 'You are the GOD / ORCHESTRATOR of this project — your job is to ORCHESTRATE, not to implement: maintain live situational awareness and delegate the work. (1) AWARENESS — always know what is going on: keep an accurate picture of every agent (active vs archived/idle), the task board, and all in-flight work; drain your inbox continually and triage every other agent\'s requests, answering clarifications so the team runs autonomously. (2) DELEGATE — decompose work and fan it out to the project agents via their inboxes (route messages and assign owners; do not do their jobs); do NOT take on grunt implementation yourself. (3) OWN ONLY THE IMPORTANT, high-leverage things — task decomposition, dispatch decisions, sign-offs, conflict resolution, branch integration, and final QA — and remain the sole scribe of board.md. You are otherwise fully autonomous — there is NO separate approval queue. For the genuinely critical (destructive actions, spending real money, scope changes, unresolvable conflicts), ask the human directly in your own session and let the tool-permission prompt gate the action; the human approves natively, including remotely from their phone via /remote-control. Keep the team unblocked. WEB/BROWSER work is DELEGABLE: every agent now has its OWN live browser, so route web/browser tasks to the agent that owns the work instead of funneling them all to yourself — you MAY still browse yourself when it is the high-leverage move (quick research, a sign-off check), but do not become the team\'s sole web operator.'
       : meta.isAssistant
       ? 'You are Michael\'s PREP ASSISTANT. You will be handed short, possibly vague instructions (each begins with "ENRICH TASK:"). For each one: (1) figure out which project it concerns and cd into the most relevant repo — you start in Michael\'s home directory; (2) gather concrete context READ-ONLY (exact file paths, current state, relevant code, conventions, active branch, gotchas) — NEVER modify, create, or delete files; (3) rewrite the instruction into ONE clear, self-contained prompt that Michael can execute autonomously, preserving the user\'s original intent without inventing scope. Then deliver it: write ONE message JSON into your outbox with "to":"god", "act":"request", a short subject, and the finished prompt as the body. Do NOT perform the task yourself — your only output is the improved prompt sent to Michael.'
       : 'For anything ambiguous, cross-cutting, or needing sign-off, address a message to "god".';
+    // Every agent owns a live browser (the built-in browser MCP server is granted
+    // to all agents). Tell them how to use it and how the user watches it.
+    const browserLine = 'You have your OWN live browser — use mcp__browser__* (browser_navigate / browser_snapshot / browser_click / browser_type / browser_read_text / browser_screenshot). Call browser_snapshot to get each clickable element\'s ref before clicking/typing. This is the live browser pane the user can watch: when you act, the bottom-left Browser pane auto-follows you (the user can also pin your tab to watch you). For plain text lookups WebSearch/WebFetch still work too.';
     return [
       `You are "${meta.name}" (${meta.id}), an autonomous agent in a collaborating team of Claude agents.`,
       `Your private workspace is ${dir}. The shared project is ${root}. Full protocol: ${root}/PROTOCOL.md.`,
@@ -467,9 +628,11 @@ export class ProjectManager {
       `3. To ask another agent for something or share information, write ONE message JSON into ${dir}/outbox/ (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox.`,
       '4. At the END of a task, append what you learned to memory.md so future-you remembers.',
       `5. If a task you were given includes a [task:<id>] marker, report progress to the human by writing ONE JSON file into ${dir}/outbox/ shaped {"type":"task-update","taskId":"<id>","kind":"doing|blocked|done|note","text":"one short line for the board"}. It is NOT a message (no recipient, no reply); the harness shows it on that task's card, and kind doing|blocked|done also moves the card into that column. Post one when you start, when you hit a blocker (say why), and when you finish.`,
+      skillsLine,
       memoryLine,
       godLine,
-      `Env vars available to you: AGENT_ID, AGENT_NAME, PROJECT_ROOT, AGENT_DIR.`
+      browserLine,
+      `Env vars available to you: AGENT_ID, AGENT_NAME, PROJECT_ROOT, AGENT_DIR${knowledge ? ', KNOWLEDGE_DIR' : ''}.`
     ].filter(Boolean).join('\n');
   }
 
@@ -594,12 +757,17 @@ export class ProjectManager {
         const full = join(outbox, f);
         try {
           const partial = JSON.parse(readFileSync(full, 'utf8')) as
-            Partial<ProjectMessage> & { type?: string; taskId?: string; kind?: string; text?: string };
+            Partial<ProjectMessage> & {
+              type?: string; taskId?: string; kind?: string; text?: string;
+              slug?: string; title?: string; description?: string; body?: string; tags?: unknown;
+            };
           // A task-update is a board side-channel, NOT mail: handle it entirely
           // here so a missing/typo taskId can never fall through to routeMessage
           // and land as empty junk in god's inbox (losing the update too).
           if (partial.type === 'task-update') {
             this.appendTaskUpdate(id, partial); // id = owning dir = authoritative author
+          } else if (partial.type === 'skill-proposal') {
+            this.stageSkillProposal(id, partial); // a learned skill → knowledge library
           } else {
             const msg = this.normalize(partial, id);
             msg.from = id; // sender is authoritative — the owning directory
@@ -685,12 +853,53 @@ export class ProjectManager {
     this.appendLog({ kind: 'task-update', taskId, by, state: kind });
     this.emit?.('project:taskUpdated', { taskId, by, kind, text: u.text });
   }
+
+  /** Stage a skill an agent drafted into the knowledge library's `proposals/` dir for
+   *  the curator to promote. Like task-updates, this is a side-channel handled entirely
+   *  here — single-writer discipline: agents propose into their own outbox, the harness
+   *  promotes. A missing title/body is logged, never routed as junk mail. */
+  private stageSkillProposal(
+    by: string,
+    raw: { slug?: string; title?: string; description?: string; body?: string; tags?: unknown }
+  ): void {
+    const root = this.root();
+    if (!root) return;
+    const title = typeof raw.title === 'string' ? raw.title.trim() : '';
+    const body = typeof raw.body === 'string' ? raw.body.trim() : '';
+    if (!title || !body) { this.appendLog({ kind: 'skill-proposal-miss', by, reason: 'missing title/body' }); return; }
+    const slug = (typeof raw.slug === 'string' && raw.slug ? raw.slug : title)
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'skill';
+    const tags = Array.isArray(raw.tags) ? raw.tags.filter((t): t is string => typeof t === 'string').slice(0, 8) : [];
+    const proposalsDir = join(root, 'knowledge', 'proposals');
+    mkdirSync(join(proposalsDir, '.done'), { recursive: true });
+    this.atomicWriteJson(join(proposalsDir, `${stamp()}-${shortRand()}.json`), {
+      slug,
+      title: title.slice(0, 120),
+      description: (typeof raw.description === 'string' ? raw.description : '').slice(0, 200),
+      body,
+      tags,
+      by
+    });
+    this.appendLog({ kind: 'skill-proposal', by, slug });
+    this.emit?.('project:skillProposal', { by, slug, title: title.slice(0, 120) });
+  }
+
   memory(id: string): string {
     const p = join(this.agentDir(id), 'memory.md');
     return existsSync(p) ? readFileSync(p, 'utf8') : '';
   }
   inbox(id: string): ProjectMessage[] {
     return this.listMessages(join(this.agentDir(id), 'inbox'));
+  }
+  /** Tail of an agent's captured utterances (what it said while working). Mirrors
+   *  logTail: read says.jsonl, keep the last N lines, parse resiliently. */
+  saysTail(id: string, n = 200): AgentSay[] {
+    const p = join(this.agentDir(id), 'says.jsonl');
+    if (!existsSync(p)) return [];
+    return readFileSync(p, 'utf8').trim().split('\n').filter(Boolean)
+      .slice(-n)
+      .map((l) => { try { return JSON.parse(l) as AgentSay; } catch { return null; } })
+      .filter((s): s is AgentSay => s !== null);
   }
   logTail(n = 200): unknown[] {
     const root = this.root();
@@ -778,6 +987,15 @@ The harness shows it on that task's card. \`kind\` doing/blocked/done also moves
 into that column; \`note\` is informational only. Post one when you START, when you're
 BLOCKED (say why in \`text\`), and when you're DONE. Never edit \`tasks.json\` yourself.
 
+## Your browser
+You have your OWN live browser via the \`mcp__browser__*\` tools (\`browser_navigate\`,
+\`browser_snapshot\`, \`browser_click\`, \`browser_type\`, \`browser_read_text\`,
+\`browser_screenshot\`, plus \`browser_go_back\`/\`browser_go_forward\`/\`browser_reload\`/\`browser_wait\`).
+Always \`browser_snapshot\` a page to get each element's \`ref\` before \`browser_click\`/\`browser_type\`.
+Web/browser tasks are delegable — anyone can be assigned one. The user watches one agent's
+browser at a time in the bottom-left pane; it auto-follows whoever just acted (the user can
+pin a tab). For plain text lookups the built-in \`WebSearch\`/\`WebFetch\` tools also work.
+
 ## Rules of the road
 - Only \`request\`, \`query\`, and \`propose\` expect a reply. \`inform\` and \`done\` are terminal —
   don't reply to them, or two agents will loop forever.
@@ -804,10 +1022,17 @@ Your \`memory.md\` is mined into the palace automatically, so the durable facts 
 write there become searchable by every agent. You don't run \`mine\` yourself.
 `;
 
+// PreToolUse is a human-in-the-loop permission gate: the hook (and its shim) must
+// stay alive long enough for the user to click Approve/Deny. Keep this in sync with
+// the settings.json PreToolUse `timeout` and HookServer.PERMISSION_TIMEOUT_MS.
+const PRETOOL_HOOK_TIMEOUT_SEC = 3600; // 60 min
+
 // ─── cth-hook shim (written to <project>/bin/cth-hook.cjs) ───────────────────
 // A minimal pipe: read the hook payload on stdin, tag it with this agent's id,
 // forward it to the project's UDS, and relay the response back to `claude`. All
-// the real logic lives in the main process (HookServer). Never blocks a stop on error.
+// the real logic lives in the main process (HookServer). The shim self-kills after a
+// short grace for most events, but waits out the human for PreToolUse. Never blocks
+// a stop on error.
 const HOOK_SHIM = `#!/usr/bin/env node
 'use strict';
 const net = require('net');
@@ -827,7 +1052,8 @@ process.stdin.on('end', () => {
   c.on('data', (d) => { resp += d; });
   c.on('end', () => done(0));
   c.on('error', () => process.exit(0));
-  setTimeout(() => process.exit(0), 5000).unref();
+  const killMs = payload.hook_event_name === 'PreToolUse' ? ${PRETOOL_HOOK_TIMEOUT_SEC * 1000} : 5000;
+  setTimeout(() => process.exit(0), killMs).unref();
 });
 `;
 

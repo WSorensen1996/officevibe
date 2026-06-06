@@ -41,10 +41,16 @@ export interface HarnessConfig {
   defaultCommand: string;
   /** Default model for newly spawned agents (e.g. 'claude-sonnet-4-6[1m]'); unset = CLI default. */
   defaultModel?: string;
+  /** Default effort level for newly spawned agents; unset = Claude Code's own default. */
+  defaultEffort?: EffortLevel;
   semanticMemory: boolean;
   embeddingModel: 'minilm' | 'embeddinggemma';
   sttModel: 'whisper-base.en' | 'whisper-tiny.en';
 }
+
+/** Claude Code's reasoning/effort levels, passed through as the `--effort` flag.
+ *  `xhigh`/`max` are Opus-tier; `undefined` means "no flag" → the CLI default. */
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 /** The Sonnet model with the 1M-token context window — used for Michael's prep
  *  assistant (cheap, large-context context gathering). Mirrors ASSISTANT_MODEL
@@ -73,13 +79,36 @@ export const AGENT_MODELS: ModelOption[] = [
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' }
 ];
 
-/** Build the command line to feed into spawnPty, honoring autoMode and an
- *  optional per-agent model override (injected as `--model <model>`). */
+export interface EffortOption {
+  /** undefined = no --effort flag (Claude Code's own default) */
+  id?: EffortLevel;
+  label: string;
+  /** Marks an Opus-tier level (xhigh/max) — surfaced as a hint in the picker. */
+  opus?: boolean;
+}
+
+/** The effort levels offered in the "add agent" picker, the per-agent selector,
+ *  and the global default in Settings. `default` leaves the flag off so the agent
+ *  inherits Claude Code's own effort setting. */
+export const AGENT_EFFORTS: EffortOption[] = [
+  { id: undefined, label: 'default' },
+  { id: 'low', label: 'Low' },
+  { id: 'medium', label: 'Medium' },
+  { id: 'high', label: 'High' },
+  { id: 'xhigh', label: 'X-High', opus: true },
+  { id: 'max', label: 'Max', opus: true }
+];
+
+/** Build the command line to feed into spawnPty, honoring autoMode and the
+ *  optional per-agent model (`--model <model>`) and effort (`--effort <level>`)
+ *  overrides. The `--effort` flag overrides any settings.json effortLevel. */
 export function buildSpawnCommand(
   config: Pick<HarnessConfig, 'defaultCommand' | 'autoMode'>,
-  model?: string
+  model?: string,
+  effort?: EffortLevel
 ): string {
   const base = config.defaultCommand || 'claude';
   const withModel = model ? `${base} --model ${model}` : base;
-  return config.autoMode ? `${withModel} --permission-mode bypassPermissions` : withModel;
+  const withEffort = effort ? `${withModel} --effort ${effort}` : withModel;
+  return config.autoMode ? `${withEffort} --permission-mode bypassPermissions` : withEffort;
 }

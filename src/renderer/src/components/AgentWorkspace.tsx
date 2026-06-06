@@ -183,7 +183,7 @@ export function AgentWorkspace({ agent, tab }: AgentWorkspaceProps) {
         ) : tab === 'files' ? (
           <FilesTab cwd={agent.cwd} />
         ) : tab === 'messages' ? (
-          <ThreadsPanel agentId={agent.id} />
+          <ThreadsPanel agentId={agent.id} agentName={agent.name} accent={agent.accent} />
         ) : tab === 'logs' ? (
           <LogsTab agentId={agent.id} />
         ) : null}

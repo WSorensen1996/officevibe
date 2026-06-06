@@ -6,7 +6,7 @@ import { CSSProperties } from 'react';
 export type IconName =
   | 'gear' | 'plus' | 'x' | 'check' | 'arrow-right' | 'pause' | 'play'
   | 'bell' | 'folder' | 'terminal' | 'code' | 'web' | 'mcp' | 'sparkle'
-  | 'expand' | 'minimize' | 'mic';
+  | 'expand' | 'minimize' | 'mic' | 'book';
 
 interface IconDef {
   ink: string;     // primary color path d
@@ -85,6 +85,11 @@ const paths: Record<IconName, IconDef> = {
   mic: {
     accentColor: 'var(--cth-coral)',
     ink:   'M7 2h2v1h1v6h-1v1H7v-1H6V3h1zM5 9h1v3h5V9h1v4H5zM7 13h2v2H7zM4 15h8v1H4z'
+  },
+  // Ledger / book — the skills library: a hollow frame with page lines.
+  book: {
+    accentColor: 'var(--cth-peach)',
+    ink:   'M3 2h10v12H3zM4 3v10h8V3zM5 6h6v1H5zM5 8h6v1H5zM5 10h4v1H5z'
   }
 };
 

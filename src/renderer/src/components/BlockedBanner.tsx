@@ -4,7 +4,7 @@ import type { BlockReason } from '@/store/store';
 
 export interface BlockedBannerProps {
   reason: BlockReason;
-  onAction: (label: string, send?: string) => void;
+  onAction: (action: BlockReason['actions'][number]) => void;
 }
 
 export function BlockedBanner({ reason, onAction }: BlockedBannerProps) {
@@ -63,7 +63,7 @@ export function BlockedBanner({ reason, onAction }: BlockedBannerProps) {
             key={a.label}
             variant={a.kind === 'approve' ? 'primary' : a.kind === 'deny' ? 'destructive' : 'secondary'}
             size="sm"
-            onClick={() => onAction(a.label, a.send)}
+            onClick={() => onAction(a)}
           >
             {a.label}
           </PixelButton>

@@ -15,7 +15,7 @@ export function AgentsTab() {
   const select = useStore((s) => s.select);
   const setAddAgentOpen = useStore((s) => s.setAddAgentOpen);
   const toolCounts = useStore((s) => s.toolCounts);
-  const { restartingId, restartWithModel } = useAgentRestart();
+  const { restartingId, restart } = useAgentRestart();
 
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 12, background: 'var(--cth-paper-200)' }}>
@@ -35,11 +35,13 @@ export function AgentsTab() {
             isAssistant={a.isAssistant}
             onClick={() => select(a.id)}
             model={a.model}
+            effort={a.effort}
             toolCalls={toolCounts[a.id] ?? 0}
             restarting={restartingId === a.id}
             canRestart={!!a.ptyId}
-            onPickModel={(m) => restartWithModel(a, m)}
-            onRestart={() => restartWithModel(a, a.model)}
+            onPickModel={(m) => restart(a, { model: m })}
+            onPickEffort={(e) => restart(a, { effort: e })}
+            onRestart={() => restart(a, {})}
           />
         ))}
         <PixelButton

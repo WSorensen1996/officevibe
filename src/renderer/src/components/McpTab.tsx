@@ -23,7 +23,7 @@ export function McpTab() {
   const [restartingAll, setRestartingAll] = useState(false);
 
   const agents = useStore((s) => s.agents);
-  const { restartWithModel } = useAgentRestart();
+  const { restart } = useAgentRestart();
 
   const load = useCallback(async () => {
     try {
@@ -60,7 +60,7 @@ export function McpTab() {
   const restartAll = async () => {
     setRestartingAll(true);
     try {
-      for (const a of agents) if (a.ptyId) await restartWithModel(a, a.model);
+      for (const a of agents) if (a.ptyId) await restart(a, {});
     } finally {
       setRestartingAll(false);
     }

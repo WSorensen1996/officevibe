@@ -61,10 +61,26 @@ export interface HarnessConfig {
   defaultCommand: string;
   /** Default model for newly spawned agents (e.g. 'claude-sonnet-4-6[1m]'); unset = CLI default. */
   defaultModel?: string;
+  /** Default effort level for newly spawned agents (passed as `--effort <level>`);
+   *  unset = Claude Code's own default. xhigh/max are Opus-tier. */
+  defaultEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /** Enable semantic memory (MemPalace CLI). No-op if mempalace isn't installed. */
   semanticMemory: boolean;
   /** Embedding model for the palace: lightweight 'minilm' or multilingual 'embeddinggemma'. */
   embeddingModel: 'minilm' | 'embeddinggemma';
+  /** Enable the self-improvement skill loop (capture → inject → curate). Independent
+   *  of semanticMemory: ranking falls back to recency when MemPalace is absent. */
+  skillLearning: boolean;
+  /** Minutes between background curator cycles (promote proposals + lifecycle + consolidate). */
+  curatorIntervalMinutes?: number;
+  /** Days of inactivity before an agent-created skill is marked stale. */
+  skillStaleAfterDays?: number;
+  /** Days of inactivity before a stale skill is archived (moved aside, never deleted). */
+  skillArchiveAfterDays?: number;
+  /** Max number of skills injected into an agent's context per task. */
+  maxInjectedSkills?: number;
+  /** Skip the curator's LLM consolidation when 5h or 7d Claude usage exceeds this percent. */
+  curatorUsageCeilingPercent?: number;
   /** Whisper dictation model: accurate 'whisper-base.en' (default) or lighter/faster
    *  'whisper-tiny.en'. The string is the on-disk model folder name the STT worker loads. */
   sttModel: 'whisper-base.en' | 'whisper-tiny.en';
@@ -99,6 +115,12 @@ const DEFAULTS: HarnessConfig = {
   defaultCommand: 'claude',
   semanticMemory: true,
   embeddingModel: 'minilm',
+  skillLearning: true,
+  curatorIntervalMinutes: 60,
+  skillStaleAfterDays: 30,
+  skillArchiveAfterDays: 90,
+  maxInjectedSkills: 3,
+  curatorUsageCeilingPercent: 80,
   sttModel: 'whisper-base.en',
   missions: [],
   notifications: false,

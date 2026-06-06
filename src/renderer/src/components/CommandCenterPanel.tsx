@@ -4,6 +4,7 @@ import { PixelButton } from './PixelButton';
 import { TasksKanban } from './TasksKanban';
 import { AgentsTab } from './AgentsTab';
 import { McpTab } from './McpTab';
+import { SkillsTab } from './SkillsTab';
 import { SettingsTab } from './SettingsTab';
 import { UsageMeter } from './UsageMeter';
 import { Select } from './Select';
@@ -16,12 +17,13 @@ import { useStore, type Agent } from '@/store/store';
  *  here we surface a task board that dispatches & schedules work, the agent
  *  roster, a memory view, and a live activity feed / board / usage meter. */
 
-type CCTab = 'tasks' | 'agents' | 'memory' | 'activity' | 'handbook' | 'connections' | 'settings';
+type CCTab = 'tasks' | 'agents' | 'memory' | 'skills' | 'activity' | 'handbook' | 'connections' | 'settings';
 
 const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'] }[] = [
   { key: 'tasks', label: 'tasks', icon: 'check' },
   { key: 'agents', label: 'agents', icon: 'mcp' },
   { key: 'memory', label: 'memory', icon: 'sparkle' },
+  { key: 'skills', label: 'skills', icon: 'book' },
   { key: 'activity', label: 'activity', icon: 'bell' },
   { key: 'handbook', label: 'commands', icon: 'code' },
   { key: 'connections', label: 'connections', icon: 'web' },
@@ -83,6 +85,7 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         {tab === 'tasks' && <TasksKanban />}
         {tab === 'memory' && <MemoryTab godId={agent.id} />}
+        {tab === 'skills' && <SkillsTab />}
         {tab === 'activity' && <ActivityTab />}
         {tab === 'handbook' && <HandbookTab />}
         {tab === 'agents' && <AgentsTab />}
