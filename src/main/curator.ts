@@ -24,6 +24,7 @@ import type { UsageLimits } from './project';
 const CONSOLIDATE_TIMEOUT_MS = 180_000;       // hard cap on the headless curator run
 const IDLE_DEBOUNCE_MS = 45_000;              // collapse a burst of agent stops into one cycle
 const CONSOLIDATE_EVERY_MS = 6 * 60 * 60 * 1000; // run the (paid) LLM pass at most this often
+const CONSOLIDATE_RETRY_MS = 30 * 60 * 1000;  // after a failed/empty LLM run, retry this soon (not the full 6h)
 const MIN_SKILLS_TO_CONSOLIDATE = 6;          // below this, there's nothing worth merging
 
 export class Curator {
@@ -77,13 +78,16 @@ export class Curator {
       const promoted = this.knowledge.promoteProposals();
       const patched = this.knowledge.applyStagedPatches();
       const aged = this.knowledge.runLifecycle();
-      // Cheap, no-LLM dedup fast-path EVERY cycle: merge obvious overlaps (shared tag +
-      // overlapping titles) without waiting for the 6-skill floor or a long-lived session.
+      // Safety net: graduate any provisional skill already at/above the use threshold that
+      // never flipped (e.g. uses recorded under an older, higher threshold). Cheap + idempotent.
+      const graduated = this.knowledge.reconcileGraduations();
+      // Cheap, no-LLM dedup fast-path EVERY cycle: merge obvious overlaps (topical title
+      // tokens or shared tags) without waiting for the 6-skill floor or a long-lived session.
       let deduped = 0;
       const dupPlan = this.knowledge.findDuplicateMerges();
       if (dupPlan.merge && dupPlan.merge.length) deduped = this.knowledge.applyCuratorPlan(dupPlan, 'dedup');
-      if (promoted || patched || aged || deduped) {
-        console.log(`[curator] ${trigger}: promoted ${promoted}, patched ${patched}, aged ${aged}, deduped ${deduped}`);
+      if (promoted || patched || aged || graduated || deduped) {
+        console.log(`[curator] ${trigger}: promoted ${promoted}, patched ${patched}, aged ${aged}, graduated ${graduated}, deduped ${deduped}`);
       }
 
       // LLM consolidation — periodic, budget-gated, only once the library is big enough.
@@ -91,12 +95,23 @@ export class Curator {
       const skills = this.knowledge.listSkills();
       const due = now - this.lastConsolidateAt > CONSOLIDATE_EVERY_MS;
       if (due && skills.length >= MIN_SKILLS_TO_CONSOLIDATE && this.withinBudget()) {
-        this.lastConsolidateAt = now;
-        this.knowledge.saveCuratorTimestamp(now); // persist so the throttle survives restarts
         const plan = await this.runConsolidationLLM(skills);
         if (plan) {
+          // Genuine round-trip (even an empty {merge:[],archive:[]} plan): arm the full 6h
+          // throttle, and record the run so "ran, found nothing" is observable.
+          this.lastConsolidateAt = now;
+          this.knowledge.saveCuratorTimestamp(now); // persist so the throttle survives restarts
           const ops = this.knowledge.applyCuratorPlan(plan);
           if (ops) console.log(`[curator] consolidation applied ${ops} op(s)`);
+          else this.knowledge.recordCuratorRun('consolidate', 0);
+        } else {
+          // null = timeout / parse-fail / spawn error. Don't burn the full 6h window on a
+          // failed run; back off to a short retry so a transient failure self-heals.
+          const backoff = now - CONSOLIDATE_EVERY_MS + CONSOLIDATE_RETRY_MS;
+          this.lastConsolidateAt = backoff;
+          this.knowledge.saveCuratorTimestamp(backoff);
+          this.knowledge.recordCuratorRun('consolidate-failed', 0);
+          console.warn('[curator] consolidation produced no plan (timeout/parse/empty); retrying within ~30m');
         }
       }
     } catch (e) {

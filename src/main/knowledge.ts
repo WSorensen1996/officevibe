@@ -317,17 +317,32 @@ export class KnowledgeManager {
     if (!this.enabled()) return '';
     // Only real skills (native SKILL.md) are recallable — bare deliverables (entries
     // with a `path`: briefs/research/investigations) are browsable in the admin tab but
-    // never injected as skills.
-    const index = this.readIndex().filter((e) => (e.state === 'active' || e.state === 'provisional') && !e.path);
+    // never injected as skills. Order by use_count desc so that, if the inventory ever
+    // exceeds the budget, the truncation drops the LEAST-used skills rather than whatever
+    // happens to sit last in index.json.
+    const usage = this.readUsage();
+    const index = this.readIndex()
+      .filter((e) => (e.state === 'active' || e.state === 'provisional') && !e.path)
+      .sort((a, b) =>
+        (usage[b.slug]?.use_count ?? 0) - (usage[a.slug]?.use_count ?? 0) ||
+        (usage[b.slug]?.inject_count ?? 0) - (usage[a.slug]?.inject_count ?? 0));
     if (index.length === 0) return '';
     const budget = this.getConfig().skillInventoryTokenBudget ?? 3000;
     const highlightK = this.getConfig().maxInjectedSkills ?? 3;
-    const highlight = new Set(this.rankForPrompt(prompt, highlightK).map((p) => p.slug));
+    const ranked = this.rankForPrompt(prompt, highlightK);
+    const highlight = new Set(ranked.map((p) => p.slug));
     const { lines, shownSlugs, omitted } = this.inventoryLines(index, highlight, budget);
     if (shownSlugs.length === 0) return '';
     this.bumpInject(shownSlugs);
+    // When the task clearly matches a skill, NAME it and push hard to load it — the
+    // dominant failure mode is agents acting on this one-line summary and never opening the
+    // full procedure (which encodes the pitfalls/bugs the team already paid for).
+    const top = ranked.find((p) => shownSlugs.includes(p.slug));
+    const header = top
+      ? `PROJECT SKILLS — reusable how-to the team learned for THIS project. ★ = directly relevant to your current task. You very likely have a skill for this: load "${top.title}" (${top.slug}) with the Skill tool and FOLLOW its Procedure/Pitfalls BEFORE writing your own — it captures bugs the team already hit. Other skills below; load any by name.`
+      : 'PROJECT SKILLS — reusable how-to the team learned for THIS project. ★ = most relevant to your task. Before reinventing a procedure, load the skill\'s full text with the Skill tool (by its name/slug) and follow it.';
     return [
-      'PROJECT SKILLS — reusable how-to the team has learned for THIS project. ★ = most relevant to your current task. Before reinventing a procedure, load the skill\'s full text with the Skill tool (by its name/slug) and follow it.',
+      header,
       ...lines,
       omitted > 0 ? `…and ${omitted} more — list them with the Skill tool if none above fit.` : ''
     ].filter(Boolean).join('\n');
@@ -407,15 +422,40 @@ export class KnowledgeManager {
     if (name) this.bumpUseForSkills([name]);
   }
 
-  /** Resolve free-form identifiers (Skill-tool inputs / names) to known slugs by exact
-   *  slug match or by the identifier containing/equaling a slug or sanitized title. */
+  /** Resolve free-form identifiers (Skill-tool inputs / names) to known slugs. Prefers the
+   *  EXPLICIT skill field from a stringified Skill-tool input ({"skill":"<slug>"} / name /
+   *  command) so attribution is exact; only falls back to substring scanning when no
+   *  structured field is present (older/odd input shapes). */
   private resolveSlugs(identifiers: string[]): string[] {
     const index = this.readIndex();
     const out = new Set<string>();
     for (const raw of identifiers) {
-      const hay = (raw ?? '').toLowerCase();
-      if (!hay) continue;
-      const norm = this.sanitizeSlug(raw);
+      const s = String(raw ?? '').trim();
+      if (!s) continue;
+
+      // 1) Explicit structured identifier (the common case: JSON.stringify of the Skill
+      //    tool input). Read the canonical skill field rather than scanning the blob.
+      let explicit = '';
+      if (s.startsWith('{')) {
+        try {
+          const o = JSON.parse(s) as Record<string, unknown>;
+          for (const key of ['skill', 'name', 'command', 'skillName', 'skill_name']) {
+            const v = o[key];
+            if (typeof v === 'string' && v.trim()) { explicit = v.trim(); break; }
+          }
+        } catch { /* not JSON — fall through to substring scan */ }
+      } else {
+        explicit = s; // a bare name/slug
+      }
+      if (explicit) {
+        const norm = this.sanitizeSlug(explicit);
+        const hit = index.find((e) => e.slug === norm || this.sanitizeSlug(e.title) === norm);
+        if (hit) { out.add(hit.slug); continue; }
+      }
+
+      // 2) Fallback: substring scan over the raw identifier.
+      const hay = s.toLowerCase();
+      const norm = this.sanitizeSlug(s);
       for (const e of index) {
         const titleSlug = this.sanitizeSlug(e.title);
         if (norm === e.slug || hay.includes(e.slug) || (titleSlug && hay.includes(titleSlug))) out.add(e.slug);
@@ -448,6 +488,34 @@ export class KnowledgeManager {
       for (const slug of graduate) this.setIndexState(slug, 'active');
     } catch (e) {
       console.error('[knowledge] applyUses failed:', e);
+    }
+  }
+
+  /** Idempotent safety net: graduate any provisional skill whose use_count already meets
+   *  the threshold but never flipped to active. applyUses only evaluates graduation at the
+   *  increment moment, so a use recorded under an older (higher) SKILL_GRADUATE_USES — or a
+   *  state write that didn't stick — leaves the skill stuck `provisional` (and carrying the
+   *  rankForPrompt down-weight) forever. Run cheaply every curator cycle. Returns how many
+   *  graduated. */
+  reconcileGraduations(): number {
+    if (!this.enabled()) return 0;
+    try {
+      const usage = this.readUsage();
+      const graduate: string[] = [];
+      for (const [slug, u] of Object.entries(usage)) {
+        if (u && u.state === 'provisional' && (u.use_count ?? 0) >= SKILL_GRADUATE_USES) {
+          u.state = 'active';
+          graduate.push(slug);
+        }
+      }
+      if (graduate.length) {
+        this.writeJson(this.usagePath()!, usage);
+        for (const slug of graduate) this.setIndexState(slug, 'active');
+      }
+      return graduate.length;
+    } catch (e) {
+      console.error('[knowledge] reconcileGraduations failed:', e);
+      return 0;
     }
   }
 
@@ -534,6 +602,10 @@ export class KnowledgeManager {
         try { renameSync(full, join(doneDir, `bad-${f}`)); } catch { /* noop */ }
       }
     }
+    // applyPatch snapshots the whole library before each patch. The only other pruner lives
+    // inside applyCuratorPlan's ops>0 branch, which may never fire — so without pruning here
+    // patch backups grow unbounded. Cap them to curatorBackupKeep.
+    if (applied > 0) this.pruneBackups(this.getConfig().curatorBackupKeep ?? 5);
     return applied;
   }
 
@@ -698,6 +770,13 @@ export class KnowledgeManager {
     }
   }
 
+  /** Log a curator run that applied no ops (or failed), so "ran, found nothing" is
+   *  observable under logs/curator/ instead of being silent and indistinguishable from
+   *  "never ran". `source` e.g. 'consolidate' (empty plan) or 'consolidate-failed'. */
+  recordCuratorRun(source: string, ops: number): void {
+    this.writeReport({ source, ops, renameMap: [], archived: [], backupDir: null });
+  }
+
   /** Keep only the newest `keep` pre-curation snapshots under .backups/; remove older. */
   private pruneBackups(keep: number): void {
     const backups = this.backupsDir();
@@ -777,37 +856,59 @@ export class KnowledgeManager {
    *  the members so no procedure is lost). Conservative: only obvious pairs. */
   findDuplicateMerges(): CuratorPlan {
     if (!this.enabled()) return { merge: [], archive: [] };
-    const index = this.readIndex().filter((e) => e.state !== 'archived');
+    const index = this.readIndex().filter((e) => e.state !== 'archived' && !e.path);
+    if (index.length < 2) return { merge: [], archive: [] };
     const usage = this.readUsage();
+
+    // Tokens/tags that appear in a MAJORITY of skills are boilerplate, not topical signal
+    // (the project name is in nearly every title; a layer tag like "renderer" rides every
+    // UI skill). Discount them so "overlap" reflects genuine subject similarity. Frequency-
+    // based, so it generalises without hard-coding the project name.
+    const commonCut = Math.max(2, index.length / 3);
+    const titleFreq = new Map<string, number>();
+    const tagFreq = new Map<string, number>();
+    for (const e of index) {
+      for (const t of new Set(this.tokenize(e.title))) titleFreq.set(t, (titleFreq.get(t) ?? 0) + 1);
+      for (const t of new Set(e.tags ?? [])) tagFreq.set(t, (tagFreq.get(t) ?? 0) + 1);
+    }
+    const topicalTitle = (s: string): Set<string> =>
+      new Set(this.tokenize(s).filter((t) => (titleFreq.get(t) ?? 0) <= commonCut));
+    const topicalTags = (tags: string[] | undefined): string[] =>
+      (tags ?? []).filter((t) => (tagFreq.get(t) ?? 0) <= commonCut);
+
     const merge: NonNullable<CuratorPlan['merge']> = [];
     const claimed = new Set<string>();
     for (let i = 0; i < index.length; i++) {
       const a = index[i];
       if (claimed.has(a.slug)) continue;
+      const aTitle = topicalTitle(a.title);
+      const aTags = topicalTags(a.tags);
       const cluster = [a];
       for (let j = i + 1; j < index.length; j++) {
         const b = index[j];
         if (claimed.has(b.slug)) continue;
-        const sharedTag = (a.tags ?? []).some((t) => (b.tags ?? []).includes(t));
-        if (sharedTag && this.titleOverlap(a.title, b.title) >= 2) cluster.push(b);
+        let titleOverlap = 0;
+        for (const t of topicalTitle(b.title)) if (aTitle.has(t)) titleOverlap++;
+        const sharedTags = topicalTags(b.tags).filter((t) => aTags.includes(t)).length;
+        // Reachable but conservative: 2 topical title tokens in common, OR 2 topical shared
+        // tags. (The old AND-bar — 1 shared tag AND 2 title tokens — missed real near-dups
+        // whose tags or titles had diverged.)
+        if (titleOverlap >= 2 || sharedTags >= 2) cluster.push(b);
       }
       if (cluster.length < 2) continue;
-      // Umbrella = most-used member (stable order tie-break by slug).
-      cluster.sort((x, y) => (usage[y.slug]?.use_count ?? 0) - (usage[x.slug]?.use_count ?? 0) || x.slug.localeCompare(y.slug));
+      // Umbrella = the RICHEST member so the merged skill keeps the best title/slug:
+      // most-used, then most-patched, then broadest (tag count), then slug for stability.
+      cluster.sort((x, y) =>
+        (usage[y.slug]?.use_count ?? 0) - (usage[x.slug]?.use_count ?? 0) ||
+        (usage[y.slug]?.patch_count ?? 0) - (usage[x.slug]?.patch_count ?? 0) ||
+        (y.tags?.length ?? 0) - (x.tags?.length ?? 0) ||
+        x.slug.localeCompare(y.slug));
       const umbrella = cluster[0];
       const body = [`# ${umbrella.title}`, '', ...cluster.map((c) => `## ${c.title}\n\n${this.readSkillBody(c.slug).replace(/^---\n[\s\S]*?\n---\n?/, '').trim()}`)].join('\n\n');
       merge.push({ umbrella: umbrella.slug, title: umbrella.title, description: umbrella.desc, absorb: cluster.map((c) => c.slug), body });
       for (const c of cluster) claimed.add(c.slug);
     }
     return { merge, archive: [] };
-  }
-
-  /** Count of shared content tokens between two titles (≥3 chars, stop-worded). */
-  private titleOverlap(a: string, b: string): number {
-    const ta = new Set(this.tokenize(a));
-    let n = 0;
-    for (const t of this.tokenize(b)) if (ta.has(t)) n++;
-    return n;
   }
 
   // — read helpers (for IPC / curator prompt) —
