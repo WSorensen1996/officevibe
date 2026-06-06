@@ -258,12 +258,19 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     if (!res.ok) {
       setMsg(`dispatch failed: ${res.error ?? '?'}`);
     } else {
-      // Stamp the card so the dispatch button hides; persisted, so it survives
-      // reloads until the task's status next changes (re-nudgeable when blocked).
+      // Advance the card to DOING and stamp it in ONE persist: dispatch is the
+      // root cause of "stuck in To-do" — moving the OWNER never moved the COLUMN,
+      // so a card whose assignee never posts 'doing' sat in To-do forever. Setting
+      // status:'doing' + a fresh statusUpdatedAt makes the column follow the
+      // dispatch now; the agent's later 'doing' becomes a harmless no-op, while
+      // blocked/done still move it. statusUpdatedAt MUST be `now` so the writeTasks
+      // recency merge keeps this 'doing' over the renderer's stale copy.
+      // dispatchedAt hides the dispatch button until the status next changes.
       // Map over the live store array, not the captured `t`, to avoid clobbering
       // a concurrent edit.
+      const stamp = new Date().toISOString();
       await get().persist(get().tasks.map((x) =>
-        (x.id === t.id ? { ...x, dispatchedAt: new Date().toISOString() } : x)));
+        (x.id === t.id ? { ...x, status: 'doing', statusUpdatedAt: stamp, dispatchedAt: stamp } : x)));
       useStore.getState().startFloor();
       const agents = useStore.getState().agents;
       const name = to === 'god' ? 'Michael' : (agents.find((a) => a.id === to)?.name ?? to);
@@ -298,10 +305,15 @@ const useTasksStore = create<TasksStore>((set, get) => ({
     }
     if (sent.size > 0) {
       const stamp = new Date().toISOString();
+      // Advance each dispatched card to DOING + stamp in the one persist (same
+      // root-cause fix as dispatchTask): the column follows the dispatch instead of
+      // sitting in To-do until the assignee posts 'doing'. statusUpdatedAt=now keeps
+      // it over the stale renderer copy in the writeTasks merge. All sent tasks were
+      // status==='todo' (the filter above), so 'doing' is always the right move.
       // Map over the live store array (not the captured list) so a concurrent edit
       // isn't clobbered; stamp only the ones that actually went out.
       await get().persist(get().tasks.map((x) =>
-        (sent.has(x.id) ? { ...x, dispatchedAt: stamp } : x)));
+        (sent.has(x.id) ? { ...x, status: 'doing', statusUpdatedAt: stamp, dispatchedAt: stamp } : x)));
       useStore.getState().startFloor();
     }
     setMsg(

@@ -21,7 +21,8 @@ import {
   shortWhen,
   shortId,
   canDispatchTask,
-  isTaskUnread
+  isTaskUnread,
+  isTaskStale
 } from './tasks/taskShared';
 
 export type { ProjectTask, TaskUpdate } from './tasks/taskShared';
@@ -507,6 +508,9 @@ function TaskCard({ task, assigneeName, mission, onMove, onSetPriority, onDispat
   // todo/blocked card has been dispatched it hides until its status next changes,
   // so it can't be dispatched twice (see canDispatchTask).
   const canDispatch = canDispatchTask(task);
+  // Stale = dispatched but no activity for 20m+ (e.g. a dead agent). Recomputed
+  // on every render, so the existing 5s poll re-render refreshes it — no new timer.
+  const stale = isTaskStale(task);
   const [showHistory, setShowHistory] = useState(false);
   const updates = task.updates ?? [];
   const last = updates.length ? updates[updates.length - 1] : undefined;
@@ -598,6 +602,15 @@ function TaskCard({ task, assigneeName, mission, onMove, onSetPriority, onDispat
             fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-900)'
           }} title="Plan mode — agent plans only, then parks in Needs Approval">
             <Icon name="sparkle" /> PLAN
+          </span>
+        )}
+        {stale && (
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 6px 0',
+            boxShadow: 'inset 0 0 0 1px var(--cth-coral)',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-coral)'
+          }} title="No update in 20m+ — the assignee may be stuck or gone. Re-nudge to dispatch again.">
+            ⏳ stale · no update 20m+
           </span>
         )}
         {task.dependsOn.length > 0 && (
