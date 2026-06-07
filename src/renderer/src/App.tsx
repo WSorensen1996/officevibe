@@ -60,10 +60,16 @@ export function App() {
   const [quitWarn, setQuitWarn] = useState<{ ptyCount: number } | null>(null);
   const [vpWidth, setVpWidth] = useState<number>(window.innerWidth);
 
-  // Initial config load
+  // Initial config load. Hydrate the per-project agent store BEFORE committing config
+  // to state, so useProject's config-gated effects see THIS project's agents — and a
+  // brand-new/other project starts clean instead of inheriting the last one's roster.
   useEffect(() => {
     let cancelled = false;
-    window.cth.getConfig().then(c => { if (!cancelled) setConfig(c); });
+    window.cth.getConfig().then(c => {
+      if (cancelled) return;
+      if (c.activeProjectPath) useStore.getState().hydrateForProject(c.activeProjectPath);
+      setConfig(c);
+    });
     return () => { cancelled = true; };
   }, []);
 
@@ -155,7 +161,10 @@ export function App() {
   }
 
   if (!config.onboardingComplete) {
-    return <OnboardingWizard onComplete={(next) => setConfig(next)} />;
+    return <OnboardingWizard onComplete={(next) => {
+      if (next.activeProjectPath) useStore.getState().hydrateForProject(next.activeProjectPath);
+      setConfig(next);
+    }} />;
   }
 
   return (

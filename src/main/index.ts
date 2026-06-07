@@ -1019,16 +1019,40 @@ ipcMain.handle('project:writeTasks', (_evt, tasks: unknown) => {
 });
 
 // ─── IPC: project management (open / create / switch) ───────────────────────
-/** Tear down all services bound to the current project, then relaunch the app so
- *  the boot sequence re-bootstraps everything against the newly-active project.
- *  Mirrors the reset flow minus the data wipe. The process exits → never returns. */
-function switchToProjectAndRelaunch(activeProjectPath: string, ref: ProjectRef): void {
+/** Start every service bound to the active project. No-op when no project is open.
+ *  Each service guards its own double-start, so this is safe to call after
+ *  teardownServices() to re-bootstrap in place — and it's the single boot path used
+ *  at startup (whenReady) too. */
+function bootstrapActiveProject(): void {
+  if (!hive.enabled()) return;
+  hive.ensureProject();
+  hive.startRouter();
+  syncMissions(); // arm recurring auto-dispatch missions now the router is live
+  hookServer.start();
+  memory.start(); // init per-project palace + mine loop (no-op without mempalace)
+  knowledge.ensureScaffold(); // seed the skill library dirs (no-op when disabled)
+  curator.start(); // background promote/lifecycle/consolidate loop (no-op when disabled)
+}
+
+/** Switch the active project IN-PROCESS: rewrite config, tear down the old project's
+ *  services + PTYs, re-bootstrap against the new project (every manager reads
+ *  activeProjectPath live, see the getter closures at construction), then reload the
+ *  renderer so its store + hive bootstrap re-run. Replaces the old relaunch flow,
+ *  which blanked the window in dev — app.exit() makes electron-vite tear down the
+ *  Vite dev server that the renderer loads from, so the relaunched window pointed at
+ *  a dead URL. In-process reload works in both dev (Vite stays up) and prod (app://). */
+function switchToProject(activeProjectPath: string, ref: ProjectRef): void {
   const projects = upsertProject(readConfig().projects ?? [], ref);
   writeConfig({ activeProjectPath, projects });
-  allowQuit = true;
   teardownServices('switch');
-  app.relaunch();
-  app.exit(0);
+  // Defer one tick so server.close() (hook pipe, slack) fully releases before
+  // bootstrap re-binds; bootstrap still completes long before the renderer's ~1.2s
+  // god spawn (useProject effect #1).
+  setImmediate(() => {
+    bootstrapActiveProject();
+    const wc = liveWebContents();
+    if (wc) { try { wc.reload(); } catch { /* window torn down */ } }
+  });
 }
 
 /** True only for a path that exists AND is a directory — guards the project
@@ -1058,7 +1082,7 @@ ipcMain.handle('project:create', (_evt, payload: unknown) => {
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
-  switchToProjectAndRelaunch(path, { name, path });
+  switchToProject(path, { name, path });
   return { ok: true, path };
 });
 
@@ -1067,7 +1091,7 @@ ipcMain.handle('project:create', (_evt, payload: unknown) => {
 ipcMain.handle('project:open', (_evt, path: unknown) => {
   if (typeof path !== 'string' || !path) return { ok: false, error: 'invalid path' };
   if (!isExistingDir(path)) return { ok: false, error: 'folder does not exist' };
-  switchToProjectAndRelaunch(path, { name: deriveProjectName(path), path });
+  switchToProject(path, { name: deriveProjectName(path), path });
   return { ok: true, path };
 });
 
@@ -1075,7 +1099,7 @@ ipcMain.handle('project:open', (_evt, path: unknown) => {
 ipcMain.handle('project:switch', (_evt, path: unknown) => {
   if (typeof path !== 'string' || !path) return { ok: false, error: 'invalid path' };
   if (!isExistingDir(path)) return { ok: false, error: 'project folder no longer exists' };
-  switchToProjectAndRelaunch(path, { name: deriveProjectName(path), path });
+  switchToProject(path, { name: deriveProjectName(path), path });
   return { ok: true, path };
 });
 
@@ -1116,7 +1140,6 @@ ipcMain.handle('app:cancelClose', () => {
 
 // ─── IPC: full reset (wipe data + config, relaunch into onboarding) ──────────
 ipcMain.handle('app:resetAll', () => {
-  allowQuit = true;
   // Tear everything down first so nothing writes back into the dirs we wipe.
   teardownServices('reset');
   // Erase the active project (Michael's + every agent's memory, inboxes, tasks,
@@ -1127,11 +1150,13 @@ ipcMain.handle('app:resetAll', () => {
     try { rmSync(dir, { recursive: true, force: true }); }
     catch (e) { console.error('[reset] rm', dir, e); }
   }
-  // Back to first-run defaults, then relaunch clean so all in-memory services
-  // re-bootstrap from scratch and the renderer lands on onboarding.
+  // Back to first-run defaults, then reload the renderer in place so it lands on
+  // onboarding. No relaunch — app.exit() blanks the window in dev (it kills the Vite
+  // dev server the renderer loads from). With no active project after the reset, the
+  // in-memory services stay torn down until onboarding opens a project.
   resetConfig();
-  app.relaunch();
-  app.exit(0);
+  const wc = liveWebContents();
+  if (wc) { try { wc.reload(); } catch { /* window torn down */ } }
 });
 
 // ─── IPC: token telemetry (real usage + est. cost from CC transcripts) ───────
@@ -1441,15 +1466,7 @@ app.whenReady().then(() => {
   }
 
   // Bootstrap the active project (if one is open) and start the message router.
-  if (hive.enabled()) {
-    hive.ensureProject();
-    hive.startRouter();
-    syncMissions(); // arm recurring auto-dispatch missions now the router is live
-    hookServer.start();
-    memory.start(); // init per-project palace + mine loop (no-op without mempalace)
-    knowledge.ensureScaffold(); // seed the skill library dirs (no-op when disabled)
-    curator.start(); // background promote/lifecycle/consolidate loop (no-op when disabled)
-  }
+  bootstrapActiveProject();
   createWindow();
   // Start the in-process browser MCP server and hand its endpoint to the hive so
   // EVERY agent spawns with a --mcp-config pointing at it (each with its own

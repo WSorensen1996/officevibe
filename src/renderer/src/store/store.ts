@@ -261,6 +261,10 @@ interface State {
    *  Called once at startup so a renderer reload (e.g. after the laptop sleeps)
    *  restores still-running agents and only removes truly-dead ones. */
   reconcileWithLivePtys: (livePtyIds: string[]) => void;
+  /** Load this project's persisted agents/queues/selection (scoped per project) and
+   *  swap them into the store. Called once the renderer learns activeProjectPath, so
+   *  switching projects never bleeds one team's roster into another. Idempotent. */
+  hydrateForProject: (projectPath: string) => void;
 }
 
 const LS_SIDEBAR_WIDTH = 'cth.sidebarWidth';
@@ -270,23 +274,55 @@ const LS_ARCHIVED = 'cth.archivedAgents';
 const LS_SELECTED = 'cth.selectedId';
 const LS_QUEUES = 'cth.messageQueues';
 
+// Per-project persistence: agents / queues / selection are scoped to the ACTIVE
+// project so switching never bleeds one team's roster into another. `currentProjectKey`
+// is set by hydrateForProject() once the renderer learns activeProjectPath; until then
+// the persist helpers below no-op (nothing mutates agents before hydration). The UI
+// prefs `cth.sidebarWidth` / `cth.leftTab` stay global on purpose — not per-project.
+let currentProjectKey: string | null = null;
+/** Scope a base key to the active project, or null before hydration. */
+function scopedKey(base: string): string | null {
+  return currentProjectKey ? `${base}::${currentProjectKey}` : null;
+}
+/** One-time migration from the pre-scoping global keys into the current project's
+ *  scoped keys (the globals belonged to whatever project was active when they were
+ *  written = this project at upgrade time), then drop the globals. Call AFTER
+ *  currentProjectKey is set. */
+function migrateLegacyAgentKeys(): void {
+  try {
+    if (window.localStorage.getItem(LS_AGENTS) === null) return; // already migrated / fresh
+    for (const base of [LS_AGENTS, LS_ARCHIVED, LS_SELECTED, LS_QUEUES]) {
+      const legacy = window.localStorage.getItem(base);
+      const to = scopedKey(base);
+      if (legacy !== null && to && window.localStorage.getItem(to) === null) {
+        window.localStorage.setItem(to, legacy);
+      }
+      window.localStorage.removeItem(base);
+    }
+  } catch { /* noop */ }
+}
+
 // Fields that are large or transient — not worth persisting across reloads.
 type PersistedAgent = Omit<Agent, 'recentAssistantText' | 'recentTextTs' | 'blockReason'>;
 
 function persistAgents(agents: Agent[], selectedId: string | null): void {
+  const aKey = scopedKey(LS_AGENTS), sKey = scopedKey(LS_SELECTED);
+  if (!aKey || !sKey) return; // not hydrated yet → nothing to scope to
   try {
     const slim: PersistedAgent[] = agents.map(({ recentAssistantText, recentTextTs, blockReason, ...rest }) => {
       void recentAssistantText; void recentTextTs; void blockReason;
       return rest;
     });
-    window.localStorage.setItem(LS_AGENTS, JSON.stringify(slim));
-    window.localStorage.setItem(LS_SELECTED, selectedId ?? '');
+    window.localStorage.setItem(aKey, JSON.stringify(slim));
+    window.localStorage.setItem(sKey, selectedId ?? '');
   } catch { /* noop */ }
 }
 
 function loadPersistedAgents(): Agent[] {
+  const key = scopedKey(LS_AGENTS);
+  if (!key) return [];
   try {
-    const raw = window.localStorage.getItem(LS_AGENTS);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as PersistedAgent[];
     if (!Array.isArray(parsed)) return [];
@@ -305,18 +341,22 @@ function loadPersistedAgents(): Agent[] {
 }
 
 function persistArchived(archived: Agent[]): void {
+  const key = scopedKey(LS_ARCHIVED);
+  if (!key) return;
   try {
     const slim: PersistedAgent[] = archived.map(({ recentAssistantText, recentTextTs, blockReason, ...rest }) => {
       void recentAssistantText; void recentTextTs; void blockReason;
       return rest;
     });
-    window.localStorage.setItem(LS_ARCHIVED, JSON.stringify(slim));
+    window.localStorage.setItem(key, JSON.stringify(slim));
   } catch { /* noop */ }
 }
 
 function loadPersistedArchived(): Agent[] {
+  const key = scopedKey(LS_ARCHIVED);
+  if (!key) return [];
   try {
-    const raw = window.localStorage.getItem(LS_ARCHIVED);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as PersistedAgent[];
     if (!Array.isArray(parsed)) return [];
@@ -335,17 +375,21 @@ function loadPersistedArchived(): Agent[] {
 }
 
 function persistQueues(queues: Record<string, QueuedMessage[]>): void {
+  const key = scopedKey(LS_QUEUES);
+  if (!key) return;
   try {
     // Only keep non-empty queues so the key stays small.
     const slim: Record<string, QueuedMessage[]> = {};
     for (const [id, q] of Object.entries(queues)) if (q.length) slim[id] = q;
-    window.localStorage.setItem(LS_QUEUES, JSON.stringify(slim));
+    window.localStorage.setItem(key, JSON.stringify(slim));
   } catch { /* noop */ }
 }
 
 function loadPersistedQueues(): Record<string, QueuedMessage[]> {
+  const key = scopedKey(LS_QUEUES);
+  if (!key) return {};
   try {
-    const raw = window.localStorage.getItem(LS_QUEUES);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as Record<string, QueuedMessage[]>;
     if (!parsed || typeof parsed !== 'object') return {};
@@ -363,8 +407,9 @@ function loadPersistedQueues(): Record<string, QueuedMessage[]> {
 }
 
 function loadPersistedSelectedId(agents: Agent[]): string | null {
+  const key = scopedKey(LS_SELECTED);
   try {
-    const id = window.localStorage.getItem(LS_SELECTED);
+    const id = key ? window.localStorage.getItem(key) : null;
     return id && agents.some((a) => a.id === id) ? id : (agents[0]?.id ?? null);
   } catch {
     return agents[0]?.id ?? null;
@@ -394,11 +439,9 @@ const initialLeftTab: LeftTab = (() => {
   return 'office';
 })();
 
-const initialAgents = loadPersistedAgents();
-const initialArchivedAgents = loadPersistedArchived();
-const initialSelectedId = loadPersistedSelectedId(initialAgents);
-const initialQueues = loadPersistedQueues();
-
+// Agents/queues/selection are NOT loaded at module init anymore — the active project
+// isn't known yet (it arrives async via getConfig). The store starts empty and is
+// filled by hydrateForProject() once App learns activeProjectPath. See store.ts header.
 let queuedSeq = 0;
 /** Process-unique id for a queued message (timestamp + counter avoids collisions
  *  when several are queued within the same millisecond). */
@@ -408,9 +451,9 @@ function newQueuedId(): string {
 }
 
 export const useStore = create<State>((set) => ({
-  agents: initialAgents,
-  archivedAgents: initialArchivedAgents,
-  selectedId: initialSelectedId,
+  agents: [],
+  archivedAgents: [],
+  selectedId: null,
   feeds: {},
   addAgentOpen: false,
   fullscreenAgentId: null,
@@ -426,7 +469,7 @@ export const useStore = create<State>((set) => ({
   godStatus: 'booting',
   sttBackend: null,
   sttBusy: false,
-  messageQueues: initialQueues,
+  messageQueues: {},
   floorStarted: false,
   startFloor: () => set({ floorStarted: true }),
   toolCounts: {},
@@ -435,6 +478,19 @@ export const useStore = create<State>((set) => ({
   setGodStatus: (status) => set({ godStatus: status }),
   setSttBackend: (b) => set({ sttBackend: b }),
   setSttBusy: (busy) => set({ sttBusy: busy }),
+  hydrateForProject: (projectPath) => {
+    const key = projectPath || '';
+    if (currentProjectKey === key) return; // already hydrated for this project
+    currentProjectKey = key;
+    migrateLegacyAgentKeys();
+    const agents = loadPersistedAgents();
+    const archivedAgents = loadPersistedArchived();
+    const selectedId = loadPersistedSelectedId(agents);
+    const messageQueues = loadPersistedQueues();
+    const feeds: Record<string, string[]> = {};
+    for (const a of agents) feeds[a.id] = [];
+    set({ agents, archivedAgents, selectedId, messageQueues, feeds });
+  },
   select: (id) => set((s) => { persistAgents(s.agents, id); return { selectedId: id }; }),
   updateAgent: (id, patch) =>
     set((s) => ({ agents: s.agents.map(a => a.id === id ? { ...a, ...patch } : a) })),
