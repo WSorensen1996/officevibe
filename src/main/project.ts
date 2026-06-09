@@ -784,18 +784,15 @@ export class ProjectManager {
     if (!task || task.assignee === recipient) return; // unknown task or already assigned → no-op
     task.assignee = recipient;
     task.assigneeUpdatedAt = new Date().toISOString();
-    // Advance the COLUMN out of todo/blocked on delegation, not just the OWNER —
-    // root-cause fix for "stuck in To-do": moving the assignee without moving the
-    // column left god-delegated cards parked until the worker posted 'doing', which
-    // it often skips (jumping straight to 'done'). The worker's later 'doing' is
-    // then a harmless no-op; blocked/done/needs-approval are left untouched.
-    // statusUpdatedAt=now is REQUIRED so the writeTasks recency merge keeps this
-    // over a stale renderer copy. (early-returns above if assignee===recipient, so
-    // re-delegating to the SAME worker won't re-advance — acceptable.)
-    if (task.status === 'todo' || task.status === 'blocked') {
-      task.status = 'doing';
-      task.statusUpdatedAt = task.assigneeUpdatedAt;
-    }
+    // Claim the OWNER on delegation but DELIBERATELY leave the COLUMN where it is: a
+    // delegated card stays in TODO (assigned to the recipient) and only advances to
+    // DOING when the assigned agent posts its OWN 'doing' task-update (appendTaskUpdate
+    // sets status='doing'). PROTOCOL tells every worker to post 'doing' when it starts,
+    // so the column tracks real work, not dispatch. We do NOT auto-advance here: the
+    // old "stuck in To-do" auto-advance showed cards as DOING before any work began —
+    // the human prefers an honest TODO over an optimistic DOING. A worker that skips
+    // 'doing' and jumps to 'done' still moves the card via that 'done' update, and
+    // isTaskStale re-surfaces a dispatched card that stalls in TODO.
     this.writeJson(join(root, 'tasks.json'), data);
     this.appendLog({ kind: 'task-delegated', taskId, to: recipient, from: msg.from });
     this.emit?.('project:taskUpdated', { taskId, by: recipient, kind: 'note', text: `delegated to ${recipient}` });

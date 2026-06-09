@@ -68,14 +68,14 @@ export interface ProjectTask {
 export type Status = ProjectTask['status'];
 
 /** A card is "stale" if it sits in an in-flight column (todo/doing) with no
- *  activity for a while — the safety net behind auto-advance-on-dispatch for cards
- *  that stall anyway (a dead/idle assignee that never posts a status update, a
- *  god-delegated card whose worker died, or a task created while god was offline so
- *  the create-nudge rotted). Deliberately NOT gated on dispatchedAt: a delegated
- *  card advances to 'doing' WITHOUT a dispatchedAt (see project.ts
- *  claimTaskOnDelegation), and a never-dispatched todo can stall too — both must be
- *  catchable. blocked/done/needs-approval are deliberately parked, not stalled, so
- *  they're excluded. "Latest activity" = the newest of statusUpdatedAt /
+ *  activity for a while — the safety net for cards that never start or stall (a
+ *  dead/idle assignee that never posts 'doing', a dispatched card whose worker died,
+ *  or a task created while god was offline so the create-nudge rotted). Dispatch no
+ *  longer auto-advances the column (a dispatched card stays in TODO until its agent
+ *  posts 'doing'), so this net now also catches dispatched-but-never-started todos.
+ *  Deliberately NOT gated on dispatchedAt: a never-dispatched todo can stall too, so
+ *  both must be catchable. blocked/done/needs-approval are deliberately parked, not
+ *  stalled, so they're excluded. "Latest activity" = the newest of statusUpdatedAt /
  *  dispatchedAt / createdAt / last-update ts; createdAt guarantees latest>0 so a
  *  brand-new untouched card eventually goes stale. */
 export const STALE_AFTER_MS = 20 * 60 * 1000;
@@ -97,9 +97,9 @@ export function isTaskStale(task: ProjectTask, now: number = Date.now()): boolea
 /** Whether the dispatch button should show. Dispatchable columns only
  *  (todo/blocked), and hidden once dispatched until the task's status changes
  *  again — so a freshly dispatched card can't be re-dispatched, but a stuck or
- *  blocked one stays re-nudgeable. A STALE card is ALWAYS re-nudgeable (even when
- *  status==='doing' after auto-advance), so a stalled card can be kicked again
- *  instead of the dispatchedAt-hides-the-button trap leaving it dead. ISO-8601 UTC
+ *  blocked one stays re-nudgeable. A STALE card is ALWAYS re-nudgeable (in todo or
+ *  doing), so a stalled card can be kicked again instead of the
+ *  dispatchedAt-hides-the-button trap leaving it dead. ISO-8601 UTC
  *  strings compare chronologically as plain strings (same convention the writeTasks
  *  merge relies on). */
 export function canDispatchTask(task: ProjectTask): boolean {
