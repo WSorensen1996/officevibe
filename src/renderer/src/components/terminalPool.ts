@@ -13,7 +13,7 @@
  * unmount — the rendered content moves with it, so the terminal is always
  * visible immediately, no repaint required.
  */
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 
@@ -34,17 +34,22 @@ export interface TerminalEntry {
 
 const pool = new Map<string, TerminalEntry>();
 
-type ThemeMap = Record<string, string>;
-
 /** Get (or lazily create) the persistent terminal for a pty. Theme/font are
  *  only used at creation; an attaching view re-applies its own afterwards. */
-export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14): TerminalEntry {
+export function acquireTerminal(ptyId: string, theme?: ITheme, fontSize = 14): TerminalEntry {
   const existing = pool.get(ptyId);
   if (existing) return existing;
 
   const host = document.createElement('div');
   host.style.width = '100%';
   host.style.height = '100%';
+
+  // Match the rest of the app's mono text by reading the same design token.
+  // (--cth-font-mono currently leads with VT323, so this keeps the retro look
+  // while making the choice token-driven; revert by hardcoding 'VT323, monospace'.)
+  const monoFont =
+    getComputedStyle(document.documentElement).getPropertyValue('--cth-font-mono').trim() ||
+    'VT323, monospace';
 
   const term = new Terminal({
     // Match the pty's spawn geometry (PtyManager spawns at 100×30). Before a view
@@ -54,7 +59,7 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     cols: 100,
     rows: 30,
     theme,
-    fontFamily: 'VT323, monospace',
+    fontFamily: monoFont,
     fontSize,
     lineHeight: 1.0,
     cursorBlink: true,

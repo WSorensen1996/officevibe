@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
+import type { ITheme } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
+import './xterm-theme.css';
 import { Icon } from './Icon';
 import { acquireTerminal, attachTerminal } from './terminalPool';
 
@@ -45,61 +47,79 @@ const zoomBtnStyle: CSSProperties = {
   padding: 0
 };
 
-// Light theme — cream paper. The ANSI "white" / "yellow" / bright slots are
-// remapped to readable dark inks: programs that print white or pale-yellow text
-// (expecting a dark terminal) were previously invisible on the cream background.
-const lightTheme = {
-  background: '#FCFAF0',
-  foreground: '#1A1320',
-  cursor: '#FF6B6B',
-  cursorAccent: '#FCFAF0',
-  selectionBackground: '#FFEC99',
-  selectionForeground: '#1A1320',
-  black:        '#1A1320',
-  red:          '#D1453B',
-  green:        '#2E9E54',
-  yellow:       '#B8860B',
-  blue:         '#2B6CB0',
-  magenta:      '#8A5CF0',
-  cyan:         '#1F9C94',
-  white:        '#3A2F44',   // default "white" text → dark, so it's visible
-  brightBlack:  '#6B5878',
-  brightRed:    '#E0584E',
-  brightGreen:  '#3DAA62',
-  brightYellow: '#A9760A',
-  brightBlue:   '#3B7DC4',
-  brightMagenta:'#9B72F2',
-  brightCyan:   '#2BA89F',
-  brightWhite:  '#1A1320'
+// xterm paints cell contents on a canvas, so its `theme` accepts only literal
+// color strings — it can't resolve `var(--cth-*)`. We read the resolved token
+// values at apply-time and build the ITheme from them, so the terminal tracks
+// the app's design tokens instead of drifting from a hardcoded copy.
+function cthVar(name: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// Light mode runs on cream paper. The bright accent tokens are tuned for a dark
+// background and wash out on cream, so the colored ANSI slots use darkened,
+// ink-safe variants instead. In particular ANSI "white" and "bright-yellow" are
+// remapped to dark ink (see buildXtermTheme) so programs that print pale text —
+// assuming a dark terminal — stay legible on cream. These darkened hues have no
+// --cth-* equivalent, so they're preserved here as literals.
+const LIGHT_ANSI = {
+  red:           '#D1453B',
+  green:         '#2E9E54',
+  yellow:        '#B8860B',
+  blue:          '#2B6CB0',
+  magenta:       '#8A5CF0',
+  cyan:          '#1F9C94',
+  brightRed:     '#E0584E',
+  brightGreen:   '#3DAA62',
+  brightYellow:  '#A9760A',
+  brightBlue:    '#3B7DC4',
+  brightMagenta: '#9B72F2',
+  brightCyan:    '#2BA89F'
 };
 
-// Dark theme — the original neon-on-ink palette (designed for a dark background).
-const darkTheme = {
-  background: '#1A1320',
-  foreground: '#F3ECF7',
-  cursor: '#FF6B6B',
-  cursorAccent: '#1A1320',
-  selectionBackground: '#3A2F44',
-  selectionForeground: '#FFF8E7',
-  black:        '#241B2C',
-  red:          '#FF6B6B',
-  green:        '#6BCF7F',
-  yellow:       '#FFD93D',
-  blue:         '#4ECDC4',
-  magenta:      '#B197FC',
-  cyan:         '#4ECDC4',
-  white:        '#F3ECF7',
-  brightBlack:  '#857693',
-  brightRed:    '#FFB4B4',
-  brightGreen:  '#B4E5BD',
-  brightYellow: '#FFEC99',
-  brightBlue:   '#A8E6E0',
-  brightMagenta:'#D6C5FF',
-  brightCyan:   '#A8E6E0',
-  brightWhite:  '#FFFDF5'
-};
-
-const THEMES: Record<PtyTheme, typeof lightTheme> = { light: lightTheme, dark: darkTheme };
+function buildXtermTheme(mode: PtyTheme): ITheme {
+  if (mode === 'light') {
+    // Cream paper. Structural slots come from tokens; colored slots are the
+    // darkened ink-safe set above, with white/brightWhite remapped to dark ink.
+    return {
+      background: cthVar('--cth-paper-100'),
+      foreground: cthVar('--cth-ink-900'),
+      cursor: cthVar('--cth-coral'),
+      cursorAccent: cthVar('--cth-paper-100'),
+      selectionBackground: cthVar('--cth-lemon-light'),
+      selectionForeground: cthVar('--cth-ink-900'),
+      black:       cthVar('--cth-ink-900'),
+      white:       cthVar('--cth-ink-700'),   // default "white" text → dark, visible on cream
+      brightBlack: cthVar('--cth-ink-500'),
+      brightWhite: cthVar('--cth-ink-900'),
+      ...LIGHT_ANSI
+    };
+  }
+  // Dark mode — the neon-on-ink palette maps straight onto the accent tokens.
+  return {
+    background: cthVar('--cth-ink-900'),
+    foreground: cthVar('--cth-cream-50'),
+    cursor: cthVar('--cth-coral'),
+    cursorAccent: cthVar('--cth-ink-900'),
+    selectionBackground: cthVar('--cth-ink-700'),
+    selectionForeground: cthVar('--cth-cream-100'),
+    black:         cthVar('--cth-ink-900'),
+    red:           cthVar('--cth-coral'),
+    green:         cthVar('--cth-mint'),
+    yellow:        cthVar('--cth-lemon'),
+    blue:          cthVar('--cth-sky'),
+    magenta:       cthVar('--cth-lilac'),
+    cyan:          cthVar('--cth-sky'),
+    white:         cthVar('--cth-cream-50'),
+    brightBlack:   cthVar('--cth-ink-500'),
+    brightRed:     cthVar('--cth-coral-light'),
+    brightGreen:   cthVar('--cth-mint-light'),
+    brightYellow:  cthVar('--cth-lemon-light'),
+    brightBlue:    cthVar('--cth-sky-light'),
+    brightMagenta: cthVar('--cth-lilac-light'),
+    brightCyan:    cthVar('--cth-sky-light'),
+    brightWhite:   cthVar('--cth-cream-50')
+  };
+}
 
 export interface PtyTerminalViewProps {
   ptyId: string;
@@ -134,8 +154,8 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
   useEffect(() => {
     const container = hostRef.current;
     if (!container) return;
-    const entry = acquireTerminal(ptyId, THEMES[ptyThemeRef.current], fontSizeRef.current);
-    entry.term.options.theme = THEMES[ptyThemeRef.current];
+    const entry = acquireTerminal(ptyId, buildXtermTheme(ptyThemeRef.current), fontSizeRef.current);
+    entry.term.options.theme = buildXtermTheme(ptyThemeRef.current);
     entry.term.options.fontSize = fontSizeRef.current;
     attachTerminal(entry, container);
     entry.onData = (chunk) => onStreamDataRef.current?.(chunk);
@@ -186,14 +206,14 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
   // Apply theme changes to the pooled terminal and persist the choice.
   useEffect(() => {
     try { window.localStorage.setItem(LS_THEME, ptyTheme); } catch { /* noop */ }
-    acquireTerminal(ptyId, THEMES[ptyTheme], fontSizeRef.current).term.options.theme = THEMES[ptyTheme];
+    acquireTerminal(ptyId, buildXtermTheme(ptyTheme), fontSizeRef.current).term.options.theme = buildXtermTheme(ptyTheme);
   }, [ptyTheme, ptyId]);
 
   // Apply font-size (zoom) changes to the pooled terminal and re-fit cols/rows.
   useEffect(() => {
     fontSizeRef.current = fontSize;
     try { window.localStorage.setItem(LS_FONT_SIZE, String(fontSize)); } catch { /* noop */ }
-    const entry = acquireTerminal(ptyId, THEMES[ptyThemeRef.current], fontSize);
+    const entry = acquireTerminal(ptyId, buildXtermTheme(ptyThemeRef.current), fontSize);
     entry.term.options.fontSize = fontSize;
     try {
       entry.fit.fit();

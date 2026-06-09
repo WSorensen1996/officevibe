@@ -1,0 +1,34 @@
+/* DOM-layer theming for the embedded xterm terminal.
+ *
+ * xterm paints cell contents on a canvas (themed in JS via buildXtermTheme),
+ * but the scrollbar and viewport live in the DOM and are plain CSS. By default
+ * the viewport shows the browser's gray scrollbar, which clashes with the
+ * app. These rules wire it to the app's --cth-* tokens. The thumb color
+ * (ink-300) reads on both the cream light background and the dark ink one, so
+ * it works for either terminal theme without needing a mode switch. */
+
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--cth-ink-300);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: var(--cth-ink-500);
+  background-clip: padding-box;
+}
+
+/* Firefox fallback (Electron is Chromium, but harmless to include). */
+.xterm .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: var(--cth-ink-300) transparent;
+}
