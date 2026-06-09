@@ -1480,6 +1480,7 @@ app.whenReady().then(() => {
   // x-agent-token). Best-effort: binding a localhost port is near-instant and
   // resolves well before the renderer kicks off the god spawn (~1.2s after load).
   // The resolver maps the request's token → that agent's lazily-created view.
+  const browserMcpCfg = readConfig();
   void startBrowserMcp({
     resolve: (token) => {
       const id = agentTokenToId.get(token);
@@ -1494,9 +1495,15 @@ app.whenReady().then(() => {
         capture: () => captureAgentPage(id)
       };
     }
-  }).then((handle) => {
+  }, { preferredPort: browserMcpCfg.browserMcpPort }).then((handle) => {
     browserMcp = handle;
     hive.setBrowserEndpoint(handle.url);
+    // Persist the ACTUAL bound port so the next launch reuses it and the port in every
+    // agent's mcp.json stays valid across restarts (the stale-port bug). Only writes
+    // when it changed (first run, or after an EADDRINUSE ephemeral fallback).
+    if (handle.port && handle.port !== browserMcpCfg.browserMcpPort) {
+      writeConfig({ browserMcpPort: handle.port });
+    }
     console.log('[browser-mcp] listening', handle.url);
   }).catch((e) => console.error('[browser-mcp] failed to start:', e));
   // Auto-start the Slack webhook server when configured. Best-effort: a tunnel

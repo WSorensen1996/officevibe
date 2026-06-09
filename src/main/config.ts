@@ -113,6 +113,11 @@ export interface HarnessConfig {
   /** User-configured MCP servers wired into spawned agents (see src/main/mcp.ts).
    *  Secret-bearing values (env/header values) are encrypted at rest. */
   mcpServers?: McpServerDef[];
+  /** Persisted localhost port for the in-app browser MCP server. Reused across
+   *  restarts so the port baked into each agent's mcp.json stays valid — no agent
+   *  restart needed after the first run. Falls back to an ephemeral port if taken,
+   *  and the actual bound port is persisted back. 127.0.0.1-only; unset on first run. */
+  browserMcpPort?: number;
 }
 
 const DEFAULTS: HarnessConfig = {

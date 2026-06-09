@@ -643,9 +643,16 @@ export class ProjectManager {
       : meta.isAssistant
       ? coOrchestratorLine
       : 'For anything ambiguous, cross-cutting, or needing sign-off, address a message to "god".';
-    // Every agent owns a live browser (the built-in browser MCP server is granted
-    // to all agents). Tell them how to use it and how the user watches it.
-    const browserLine = 'You have your OWN live browser — use mcp__browser__* (browser_navigate / browser_snapshot / browser_click / browser_type / browser_read_text / browser_screenshot). Call browser_snapshot to get each clickable element\'s ref before clicking/typing. This is the live browser pane the user can watch: when you act, the bottom-left Browser pane auto-follows you (the user can also pin your tab to watch you). For plain text lookups WebSearch/WebFetch still work too.';
+    // Browser line is GATED on the browser MCP endpoint actually being up: claiming a
+    // browser the agent can't reach is the stale-port bug (the prompt promises
+    // mcp__browser__* but claude silently dropped the unreachable server, so the agent
+    // believes a lie and looks like it "doesn't know" it has a browser). When the
+    // endpoint is unset we DROP the browser claim and point the agent at WebSearch/
+    // WebFetch instead, so it degrades honestly. (endpoint-set is the signal we have;
+    // with the persisted-port fix it stays valid across restarts.)
+    const browserLine = this.browserEndpoint
+      ? 'You have your OWN live browser — use mcp__browser__* (browser_navigate / browser_snapshot / browser_click / browser_type / browser_read_text / browser_screenshot). Call browser_snapshot to get each clickable element\'s ref before clicking/typing. This is the live browser pane the user can watch: when you act, the bottom-left Browser pane auto-follows you (the user can also pin your tab to watch you). For plain text lookups WebSearch/WebFetch still work too.'
+      : 'For web lookups use the WebSearch and WebFetch tools. (No in-app browser is available this session, so there are no mcp__browser__* tools — do not attempt to call them.)';
     // Team-wide communication style: keep every human-facing output short, precise,
     // and easy to understand. Applies to all agents (god/assistant/workers) since
     // they all receive this injected prompt.
@@ -1131,13 +1138,17 @@ into that column; \`note\` is informational only. Post one when you START, when 
 BLOCKED (say why in \`text\`), and when you're DONE. Never edit \`tasks.json\` yourself.
 
 ## Your browser
-You have your OWN live browser via the \`mcp__browser__*\` tools (\`browser_navigate\`,
-\`browser_snapshot\`, \`browser_click\`, \`browser_type\`, \`browser_read_text\`,
-\`browser_screenshot\`, plus \`browser_go_back\`/\`browser_go_forward\`/\`browser_reload\`/\`browser_wait\`).
+When the in-app browser MCP is loaded you have your OWN live browser via the
+\`mcp__browser__*\` tools (\`browser_navigate\`, \`browser_snapshot\`, \`browser_click\`,
+\`browser_type\`, \`browser_read_text\`, \`browser_screenshot\`, plus
+\`browser_go_back\`/\`browser_go_forward\`/\`browser_reload\`/\`browser_wait\`).
 Always \`browser_snapshot\` a page to get each element's \`ref\` before \`browser_click\`/\`browser_type\`.
 Web/browser tasks are delegable — anyone can be assigned one. The user watches one agent's
 browser at a time in the bottom-left pane; it auto-follows whoever just acted (the user can
-pin a tab). For plain text lookups the built-in \`WebSearch\`/\`WebFetch\` tools also work.
+pin a tab). Your spawn prompt is authoritative about whether the browser is available this
+session: if it tells you to use \`WebSearch\`/\`WebFetch\` (no \`mcp__browser__*\` tools), do that
+instead — don't call browser tools that aren't loaded. For plain text lookups
+\`WebSearch\`/\`WebFetch\` always work.
 
 ## Rules of the road
 - Only \`request\`, \`query\`, and \`propose\` expect a reply. \`inform\` and \`done\` are terminal —

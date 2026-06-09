@@ -27,8 +27,19 @@ import { z } from 'zod';
 export interface BrowserMcpHandle {
   /** `http://127.0.0.1:<port>/mcp` — written into each agent's mcp.json. */
   url: string;
+  /** The ACTUAL bound TCP port. Persisted by the caller so the next launch can
+   *  reuse it (keeps the port baked into each agent's mcp.json valid across restarts). */
+  port: number;
   /** Stop the HTTP listener. Best-effort; safe to call when already stopped. */
   stop(): void;
+}
+
+export interface StartBrowserMcpOptions {
+  /** Preferred localhost port to bind — a persisted port reused across restarts so
+   *  the URL stays STABLE and the port in every agent's mcp.json keeps resolving.
+   *  Falls back to an OS-assigned ephemeral port if this one is taken (EADDRINUSE).
+   *  Omit or 0 = always pick an ephemeral port. */
+  preferredPort?: number;
 }
 
 /** One agent's browsing context: its (lazily-created) view + a getter for the
@@ -265,12 +276,15 @@ function readBody(req: IncomingMessage): Promise<unknown> {
 }
 
 /**
- * Start the browser MCP server on an ephemeral localhost port. Returns the URL
- * the spawner writes into every agent's mcp.json (each with its OWN per-agent
- * `x-agent-token`; the request token is resolved via deps.resolve). The SDK is
- * ESM-only, so it's pulled in via dynamic import (works from the CJS main bundle).
+ * Start the browser MCP server on a localhost port. Binds `opts.preferredPort`
+ * (a persisted port) when given so the URL stays STABLE across restarts — the
+ * port written into every agent's mcp.json keeps resolving and no agent restart
+ * is needed; falls back to an ephemeral port if it's taken. Returns the URL +
+ * the actual bound port (the caller persists it). Each request carries its OWN
+ * per-agent `x-agent-token`, resolved via deps.resolve. The SDK is ESM-only, so
+ * it's pulled in via dynamic import (works from the CJS main bundle).
  */
-export async function startBrowserMcp(deps: BrowserMcpDeps): Promise<BrowserMcpHandle> {
+export async function startBrowserMcp(deps: BrowserMcpDeps, opts: StartBrowserMcpOptions = {}): Promise<BrowserMcpHandle> {
   const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
   const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
 
@@ -312,12 +326,33 @@ export async function startBrowserMcp(deps: BrowserMcpDeps): Promise<BrowserMcpH
     await transport.handleRequest(req, res, body);
   }
 
-  await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', () => resolve()));
+  // Bind the persisted/preferred port so the URL is STABLE across restarts and the
+  // port baked into each agent's mcp.json keeps resolving. 127.0.0.1-only. If that
+  // port is taken (EADDRINUSE — e.g. a stale instance still holding it), fall back to
+  // an OS-assigned ephemeral port so startup never wedges.
+  const bind = (p: number): Promise<void> => new Promise<void>((resolve, reject) => {
+    const onError = (e: NodeJS.ErrnoException): void => { httpServer.removeListener('listening', onListening); reject(e); };
+    const onListening = (): void => { httpServer.removeListener('error', onError); resolve(); };
+    httpServer.once('error', onError);
+    httpServer.once('listening', onListening);
+    httpServer.listen(p, '127.0.0.1');
+  });
+  const preferred = opts.preferredPort && opts.preferredPort > 0 ? opts.preferredPort : 0;
+  try {
+    await bind(preferred);
+  } catch (e) {
+    if (preferred !== 0 && (e as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+      await bind(0); // persisted port taken → ephemeral fallback (caller persists the new one)
+    } else {
+      throw e;
+    }
+  }
   const addr = httpServer.address();
   const port = typeof addr === 'object' && addr ? addr.port : 0;
 
   return {
     url: `http://127.0.0.1:${port}/mcp`,
+    port,
     stop() { try { httpServer.close(); } catch { /* noop */ } }
   };
 }
