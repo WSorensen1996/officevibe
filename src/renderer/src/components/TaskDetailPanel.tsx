@@ -87,9 +87,12 @@ function TaskUpdateRow({ u, nameFor, onNewTaskFromUpdate }: {
           ><Icon name="plus" /></button>
         )}
       </div>
-      <div style={clamped ? {
-        display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden'
-      } : undefined}>
+      {/* Clamp by max-height, NOT -webkit-line-clamp: the clamp wraps a block
+          <div.cth-md><p>… (Markdown), and -webkit-line-clamp only clamps inline
+          line boxes — over block content it finds none and renders BLANK ("nothing
+          under the more"). max-height + overflow:hidden clips block content
+          reliably. 54px ≈ 3 lines at the .cth-md 18px line-height. */}
+      <div style={clamped ? { maxHeight: 54, overflow: 'hidden' } : undefined}>
         <Markdown>{u.text}</Markdown>
       </div>
       {foldable && (
