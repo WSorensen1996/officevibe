@@ -218,6 +218,16 @@ export class ProjectManager {
     this.browserEndpoint = { url };
   }
 
+  /** Authoritative "is this agent live?" probe, injected by the main process so the
+   *  router can see real PTY liveness (registry status/lastSeen lag and can't be
+   *  trusted). When set, routeMessage reroutes any direct message bound for a
+   *  non-live agent to god — so a task can NEVER be dispatched into a dead agent's
+   *  inbox (task t-mq71a2km-up8s). god is always the live fallback. */
+  private isAgentLive?: (agentId: string) => boolean;
+  setLivenessProbe(fn: (agentId: string) => boolean): void {
+    this.isAgentLive = fn;
+  }
+
   // — paths —
   /** The active project folder IS the data root (was `<harnessHome>/hive`). */
   root(): string | null {
@@ -739,13 +749,27 @@ export class ProjectManager {
     // each agent's Claude Code session (and approvable remotely). A message aimed
     // at "human" is handled by the god/orchestrator, the human's proxy here.
     const resolveTo = (to: string): string => (to === 'human' || to === 'god' ? godId : to);
+    // Bulletproof routing: a direct message resolved to a worker with NO live PTY is
+    // rerouted to god (the always-on orchestrator) rather than orphaned in a dead
+    // inbox. god/assistant are never probed (god is the fallback; assistant is
+    // send-only and handled elsewhere). Probe-absent → no reroute (e.g. tests).
+    const rawTarget = resolveTo(msg.to);
+    const rerouted = msg.to !== 'broadcast'
+      && rawTarget !== godId
+      && !!this.isAgentLive
+      && !reg.agents[rawTarget]?.isAssistant
+      && !this.isAgentLive(rawTarget);
+    const directTarget = rerouted ? godId : rawTarget;
     const candidates = msg.to === 'broadcast'
       // The roster for fan-out is the ACTIVE registry: skip the send-only prep
       // assistant and any archived agent (closed tab) so mail never piles into a
       // dead inbox no one will read.
       ? Object.keys(reg.agents).filter((a) => a !== msg.from && !reg.agents[a]?.isAssistant && !reg.agents[a]?.archived)
       // Never deliver to self — guards a god → "human" message looping back to god.
-      : [resolveTo(msg.to)].filter((t) => t !== msg.from);
+      : [directTarget].filter((t) => t !== msg.from);
+    if (rerouted) {
+      this.appendLog({ kind: 'reroute', reason: 'assignee-offline', from: msg.from, to: msg.to, reroutedTo: godId, act: msg.act, subject: msg.subject, id: msg.id });
+    }
     const delivered = candidates.filter((t) => this.deliver(msg, t));
     if (delivered.length > 0) {
       this.appendLog({ kind: 'message', from: msg.from, to: msg.to, act: msg.act, subject: msg.subject, id: msg.id, delivered: delivered.length });
@@ -764,7 +788,7 @@ export class ProjectManager {
     // not wait for the worker to post 'doing' (which it may skip, jumping
     // straight to 'done', leaving the card stuck on the creator). Same claim as
     // 8tzy's 'doing', just earlier in the lifecycle.
-    this.claimTaskOnDelegation(msg, delivered, reg, godId);
+    this.claimTaskOnDelegation(msg, delivered, reg, godId, rerouted);
     this.emitMessage(msg, delivered);
     return delivered;
   }
@@ -779,11 +803,16 @@ export class ProjectManager {
    *  agent delegating. Stamps assigneeUpdatedAt so the writeTasks merge keeps it
    *  over a stale renderer copy, while a later human reassign (newer clock) still
    *  wins. No-op if the task is unknown or already assigned to the recipient. */
-  private claimTaskOnDelegation(msg: ProjectMessage, delivered: string[], reg: Registry, godId: string): void {
+  private claimTaskOnDelegation(msg: ProjectMessage, delivered: string[], reg: Registry, godId: string, rerouted = false): void {
     if (msg.act !== 'request') return;
     if (delivered.length !== 1) return; // broadcast / multi / dropped → no single owner
     const recipient = delivered[0];
-    if (recipient === godId || reg.agents[recipient]?.isAssistant) return;
+    if (reg.agents[recipient]?.isAssistant) return;
+    // god-as-recipient normally doesn't claim (god routing a task to itself). The
+    // exception is an offline-reroute: the task was aimed at a now-dead agent and
+    // bounced to god — claim it to god so the board stops showing the dead assignee
+    // and the human sees who actually owns it.
+    if (recipient === godId && !rerouted) return;
     const m = /\[task:([^\]]+)\]/.exec(`${msg.subject}\n${msg.body}`);
     if (!m) return;
     const taskId = m[1];

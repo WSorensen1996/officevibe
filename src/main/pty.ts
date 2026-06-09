@@ -218,6 +218,13 @@ export class PtyManager {
     }));
   }
 
+  /** True when a live PTY session exists for this id (id scheme: `pty-<agentId>`).
+   *  Authoritative liveness signal — used to stop messages/tasks from being routed
+   *  into a dead agent's inbox. */
+  has(id: string): boolean {
+    return this.sessions.has(id);
+  }
+
   /** Bulk-kill every PTY for app quit / reset. This is wholesale shutdown, not
    *  individual agent lifecycle, so it suppresses the natural-exit teardown —
    *  we don't want to archive every agent or fire a storm of `git worktree

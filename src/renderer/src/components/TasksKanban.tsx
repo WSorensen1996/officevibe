@@ -923,6 +923,24 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   const [priority, setPriority] = useState(initial?.priority ?? draft0?.priority ?? 3);
   const [deps, setDeps] = useState<string[]>(initial?.dependsOn ?? draft0?.deps ?? seed?.dependsOn ?? []);
   const [status, setStatus] = useState<Status>(initial?.status ?? 'todo');
+  // Live-PTY awareness (t-mq71a2km): the router already reroutes a dispatch bound
+  // for a dead agent to Michael, but flag offline teammates in the picker too so the
+  // human never knowingly assigns to one. An agent is live iff its `pty-<id>` session
+  // exists; god is always live (the orchestrator).
+  const [livePtyIds, setLivePtyIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    let alive = true;
+    const load = (): void => {
+      window.cth.listPtys()
+        .then((ps) => { if (alive) setLivePtyIds(new Set(ps.map((p) => p.id))); })
+        .catch(() => { /* keep last good */ });
+    };
+    load();
+    const t = setInterval(load, 4000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+  const isAgentLive = (a: { id: string; isGod?: boolean }): boolean =>
+    !!a.isGod || livePtyIds.has(`pty-${a.id}`);
   // Plan mode: when dispatched, the agent produces a PLAN (not an implementation)
   // and parks the task in Needs Approval for sign-off (see useTasks.dispatchBody).
   const [planMode, setPlanMode] = useState<boolean>(initial?.planMode ?? draft0?.planMode ?? false);
@@ -1230,7 +1248,9 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
           <select value={assignee} onChange={(e) => setAssignee(e.target.value)} style={selectStyle}>
             <option value="">unassigned</option>
             {agents.map((a) => (
-              <option key={a.id} value={a.id}>{a.name}{a.isGod ? ' (god)' : ''}</option>
+              <option key={a.id} value={a.id}>
+                {a.name}{a.isGod ? ' (god)' : isAgentLive(a) ? '' : ' · offline'}
+              </option>
             ))}
           </select>
           <label style={labelStyle}>priority</label>

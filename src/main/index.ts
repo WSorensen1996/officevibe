@@ -115,6 +115,10 @@ const hive = new ProjectManager(
     catch { /* registry/window not ready */ }
   }
 );
+// Authoritative liveness: an agent is live iff its PTY session (`pty-<id>`) exists.
+// Lets the router reroute task dispatches away from dead agents to god — so a task
+// can never be assigned/delivered into a non-live agent's inbox (t-mq71a2km-up8s).
+hive.setLivenessProbe((agentId) => ptyManager.has(`pty-${agentId}`));
 const memory = new MemoryManager(
   () => readConfig().activeProjectPath,
   () => { const c = readConfig(); return { enabled: c.semanticMemory !== false, model: c.embeddingModel ?? 'minilm' }; }

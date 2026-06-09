@@ -292,16 +292,17 @@ const useTasksStore = create<TasksStore>((set, get) => ({
       useStore.getState().startFloor();
       const agents = useStore.getState().agents;
       const name = to === 'god' ? 'Michael' : (agents.find((a) => a.id === to)?.name ?? to);
-      // Honest delivery feedback: `delivered>0` only means the inbox FOLDER exists
-      // (an archived/idle agent still has one), not that anyone is live to read it.
-      // So check for a live pty and say "queued · offline" when the assignee isn't
-      // running — the reaper will re-route it; the human isn't falsely reassured.
-      const live = agents.some((a) => a.id === to && !!a.ptyId && !a.archived);
+      // Honest delivery feedback. Use REAL pty liveness (listPtys) — not a.ptyId,
+      // which only means the agent was ever spawned (its pty can be dead). When the
+      // assignee isn't live the main router reroutes the dispatch to Michael, so say
+      // exactly that rather than falsely promising it'll "run when it wakes".
+      const livePtys = await window.cth.listPtys().catch(() => []);
+      const isLive = to === 'god' || livePtys.some((p) => p.id === `pty-${to}`);
       setMsg((res.delivered ?? 0) === 0
         ? '⚠ no active agent received this'
-        : live
+        : isLive
           ? `dispatched to ${name}`
-          : `queued for ${name} · ⚠ offline, will run when it wakes`);
+          : `⚠ ${name} offline — routed to Michael`);
     }
   },
 
