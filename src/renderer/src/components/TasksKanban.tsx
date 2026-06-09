@@ -117,6 +117,48 @@ export function TasksKanban() {
   const active = tasks.filter((t) => !t.archived);
   const archived = tasks.filter((t) => t.archived);
 
+  // ─── Drag-and-drop: move a card between columns by dragging it (replaces the
+  //     old per-card status <select>). Native HTML5 DnD, no dependency. The card
+  //     carries its id in dataTransfer; each column body / sub-section is a drop
+  //     zone keyed to a Status. `dragId` drives the dragged card's dimmed look;
+  //     `overStatus` highlights the hovered drop zone. moveTask persists + stamps
+  //     statusUpdatedAt, so the agent-moved-card stale logic stays intact.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overStatus, setOverStatus] = useState<Status | null>(null);
+  const onCardDragStart = (id: string) => (e: React.DragEvent) => {
+    e.dataTransfer.setData('text/task-id', id);
+    e.dataTransfer.effectAllowed = 'move';
+    setDragId(id);
+  };
+  const onCardDragEnd = () => { setDragId(null); setOverStatus(null); };
+  // Drop-zone props for a column/sub-section that accepts cards as `status`.
+  const dropZone = (status: Status) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (!dragId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (overStatus !== status) setOverStatus(status);
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      // Ignore leaves that just cross into a child element of the same zone.
+      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+        setOverStatus((s) => (s === status ? null : s));
+      }
+    },
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      const id = e.dataTransfer.getData('text/task-id') || dragId;
+      setDragId(null);
+      setOverStatus(null);
+      if (!id) return;
+      const t = active.find((x) => x.id === id);
+      if (t && t.status !== status) moveTask(id, status);
+    }
+  });
+  // Inset ring shown on the hovered drop zone (lilac = the Needs Approval accent).
+  const dropRing = (status: Status): React.CSSProperties =>
+    overStatus === status ? { boxShadow: 'inset 0 0 0 2px var(--cth-lilac)' } : {};
+
   // One card-wiring shared by the normal column bodies and the BLOCKED column's
   // two stacked sub-sections (NEEDS APPROVAL + BLOCKED), so they stay identical.
   const renderCard = (t: ProjectTask) => (
@@ -125,11 +167,13 @@ export function TasksKanban() {
       task={t}
       assigneeName={nameFor(t.assignee)}
       mission={missionFor(t.id)}
-      onMove={(s) => moveTask(t.id, s)}
       onSetPriority={(p) => setPriority(t.id, p)}
       onDispatch={() => dispatchTask(t)}
       onArchive={() => archiveTask(t.id)}
       onEdit={() => openTask(t.id)}
+      onDragStart={onCardDragStart(t.id)}
+      onDragEnd={onCardDragEnd}
+      dragging={dragId === t.id}
     />
   );
 
@@ -230,6 +274,8 @@ export function TasksKanban() {
                   accent={NEEDS_APPROVAL.accent}
                   cards={approvalCards}
                   renderCard={renderApprovalCard}
+                  dropProps={dropZone(NEEDS_APPROVAL.key)}
+                  dropStyle={dropRing(NEEDS_APPROVAL.key)}
                   headerExtra={
                     <label
                       title="Auto-approve: instantly approve + dispatch any task that enters Needs Approval (persisted)"
@@ -254,6 +300,8 @@ export function TasksKanban() {
                   accent={col.accent}
                   cards={cards}
                   renderCard={renderCard}
+                  dropProps={dropZone(col.key)}
+                  dropStyle={dropRing(col.key)}
                 />
               </div>
             );
@@ -316,7 +364,10 @@ export function TasksKanban() {
                   </button>
                 )}
               </div>
-              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div
+                {...dropZone(col.key)}
+                style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 6, display: 'flex', flexDirection: 'column', gap: 6, ...dropRing(col.key) }}
+              >
                 {cards.length === 0 && (
                   <div style={{ fontSize: 12, color: 'var(--cth-ink-300)', textAlign: 'center', padding: '8px 0' }}>—</div>
                 )}
@@ -350,7 +401,7 @@ function approvalBtnStyle(bg: string): React.CSSProperties {
   };
 }
 
-function ColumnSubSection({ label, accent, cards, renderCard, headerExtra }: {
+function ColumnSubSection({ label, accent, cards, renderCard, headerExtra, dropProps, dropStyle }: {
   label: string;
   accent: string;
   cards: ProjectTask[];
@@ -358,6 +409,10 @@ function ColumnSubSection({ label, accent, cards, renderCard, headerExtra }: {
   /** Optional control rendered at the right edge of the sub-section header
    *  (e.g. the Needs Approval auto-approve checkbox). */
   headerExtra?: React.ReactNode;
+  /** Drag-and-drop wiring for the body (so cards can be dropped onto this
+   *  sub-section's status — needs-approval on top, blocked below). */
+  dropProps?: React.HTMLAttributes<HTMLDivElement>;
+  dropStyle?: React.CSSProperties;
 }) {
   const unread = cards.filter(isTaskUnread).length;
   return (
@@ -384,7 +439,10 @@ function ColumnSubSection({ label, accent, cards, renderCard, headerExtra }: {
           <span style={{ marginLeft: 6, display: 'inline-flex', alignItems: 'center' }}>{headerExtra}</span>
         )}
       </div>
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div
+        {...dropProps}
+        style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 6, display: 'flex', flexDirection: 'column', gap: 6, ...dropStyle }}
+      >
         {cards.length === 0 && (
           <div style={{ fontSize: 12, color: 'var(--cth-ink-300)', textAlign: 'center', padding: '8px 0' }}>—</div>
         )}
@@ -492,15 +550,19 @@ function ArchivedTaskRow({ task, onRestore, onDelete }: {
 
 // ─── Card ────────────────────────────────────────────────────────────────────
 
-function TaskCard({ task, assigneeName, mission, onMove, onSetPriority, onDispatch, onArchive, onEdit }: {
+function TaskCard({ task, assigneeName, mission, onSetPriority, onDispatch, onArchive, onEdit, onDragStart, onDragEnd, dragging }: {
   task: ProjectTask;
   assigneeName?: string;
   mission?: ScheduledMission;
-  onMove: (s: Status) => void;
   onSetPriority: (p: number) => void;
   onDispatch: () => void;
   onArchive: () => void;
   onEdit: () => void;
+  /** Drag-and-drop: the card is draggable between columns (replaces the status
+   *  <select>). `dragging` dims the card while it's the one being dragged. */
+  onDragStart?: (e: React.DragEvent) => void;
+  onDragEnd?: (e: React.DragEvent) => void;
+  dragging?: boolean;
 }) {
   const pr = Math.max(1, Math.min(5, task.priority));
   // Dispatch sends the card to its assignee's inbox; once a task is moving
@@ -526,11 +588,17 @@ function TaskCard({ task, assigneeName, mission, onMove, onSetPriority, onDispat
     && (task.statusUpdatedAt ?? '') > (last.ts ?? '');
   const lastColor = last ? (staleUpdate ? 'var(--cth-ink-300)' : UPDATE_COLOR[last.kind]) : '';
   return (
-    <div style={{
-      padding: 7, background: 'var(--cth-paper-100)',
-      boxShadow: last?.kind === 'blocked' ? 'inset 0 0 0 1px var(--cth-coral)' : 'inset 0 0 0 1px var(--cth-ink-700)',
-      display: 'flex', flexDirection: 'column', gap: 5
-    }}>
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      title="Drag to another column to change status"
+      style={{
+        padding: 7, background: 'var(--cth-paper-100)',
+        boxShadow: last?.kind === 'blocked' ? 'inset 0 0 0 1px var(--cth-coral)' : 'inset 0 0 0 1px var(--cth-ink-700)',
+        display: 'flex', flexDirection: 'column', gap: 5,
+        cursor: 'grab', opacity: dragging ? 0.4 : 1
+      }}>
       {/* Title row — click to edit. Kept separate from the controls row below so
           the status select / dispatch button are never swallowed by this click. */}
       <div
@@ -646,21 +714,8 @@ function TaskCard({ task, assigneeName, mission, onMove, onSetPriority, onDispat
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-        <select
-          value={task.status}
-          onChange={(e) => onMove(e.target.value as Status)}
-          // Width fits the lane label rather than stretching across the card.
-          style={{
-            width: 'auto', minWidth: 0, padding: '2px 4px', background: 'var(--cth-paper-100)', border: 'none',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)',
-            fontSize: 11, color: 'var(--cth-ink-900)', cursor: 'pointer'
-          }}
-        >
-          {COLUMNS.map((c) => (<option key={c.key} value={c.key}>{c.label.toLowerCase()}</option>))}
-          {/* needs-approval has no column of its own — it lives in the BLOCKED
-              column's top sub-section, so append it as an extra lane option. */}
-          <option value={NEEDS_APPROVAL.key}>{NEEDS_APPROVAL.label.toLowerCase()}</option>
-        </select>
+        {/* Status is changed by dragging the card between columns (the old status
+            <select> was removed); the parent's dropZone handler calls moveTask. */}
         {/* Inline priority (1-5), editable straight from the board — mirrors the
             form's priority picker. Tiny 'P' label + compact select, matching the
             lane select's styling. */}
