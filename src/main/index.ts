@@ -25,6 +25,13 @@ import { decryptDef, encryptDef, encryptionAvailable, isValidName, testConnectio
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 
+// Dev-runtime isolation: when running unpackaged (npm run dev), redirect userData
+// to ~/.config/officevibe-dev so iterating on source can never corrupt the stable
+// packaged AppImage's config at ~/.config/officevibe. Must run before app is ready.
+if (!app.isPackaged) {
+  app.setPath('userData', join(app.getPath('appData'), 'officevibe-dev'));
+}
+
 // Register a privileged `app://` scheme so a packaged build can fetch() its own
 // bundled assets — Chromium blocks fetch() of file:// URLs, which the in-renderer
 // Whisper speech-to-text (transformers.js) needs to load its model + wasm. The
