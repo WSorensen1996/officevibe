@@ -6,6 +6,7 @@ import { AgentsTab } from './AgentsTab';
 import { McpTab } from './McpTab';
 import { SkillsTab } from './SkillsTab';
 import { SettingsTab } from './SettingsTab';
+import { FileTree } from './FileTree';
 import { UsageMeter } from './UsageMeter';
 import { Select } from './Select';
 import { Icon } from './Icon';
@@ -16,7 +17,7 @@ import { useStore, type Agent } from '@/store/store';
  *  here we surface a task board that dispatches & schedules work, the agent
  *  roster, a memory view, skills, a command handbook, and connections. */
 
-type CCTab = 'tasks' | 'agents' | 'memory' | 'skills' | 'handbook' | 'connections' | 'settings';
+type CCTab = 'tasks' | 'agents' | 'memory' | 'skills' | 'handbook' | 'connections' | 'files' | 'settings';
 
 const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'] }[] = [
   { key: 'tasks', label: 'tasks', icon: 'check' },
@@ -25,6 +26,8 @@ const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'
   { key: 'skills', label: 'skills', icon: 'book' },
   { key: 'handbook', label: 'commands', icon: 'code' },
   { key: 'connections', label: 'connections', icon: 'web' },
+  // `files` sits just before settings so adding it shifts only settings' number key.
+  { key: 'files', label: 'files', icon: 'folder' },
   { key: 'settings', label: 'settings', icon: 'gear' }
 ];
 
@@ -109,9 +112,38 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
         {tab === 'handbook' && <HandbookTab />}
         {tab === 'agents' && <AgentsTab />}
         {tab === 'connections' && <McpTab />}
+        {tab === 'files' && <ProjectFilesTab cwd={agent.cwd} />}
         {tab === 'settings' && <SettingsTab />}
       </div>
     </PixelPanel>
+  );
+}
+
+// ─── Files tab ───────────────────────────────────────────────────────────────
+
+/** Project file browser. Lists the active project's tree (rooted at the god
+ *  agent's cwd = the active project) via the fs:listDir IPC; clicking a file
+ *  opens it in the LEFT pane (the transient `file` tab), not fullscreen. */
+function ProjectFilesTab({ cwd }: { cwd: string }) {
+  const setOpenFile = useStore((s) => s.setOpenFile);
+  const openFilePath = useStore((s) => s.openFilePath);
+  // Highlight the open file in the tree when it's within this project root.
+  const activeRel = openFilePath && (openFilePath === cwd || openFilePath.startsWith(cwd + '/'))
+    ? openFilePath.slice(cwd.length + 1)
+    : undefined;
+  const copyPath = (rel: string) => {
+    const abs = rel ? `${cwd}/${rel}` : cwd;
+    navigator.clipboard.writeText(abs).catch(() => { /* noop */ });
+  };
+  return (
+    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--cth-paper-200)' }}>
+      <FileTree
+        root={cwd}
+        activeRel={activeRel}
+        onOpenFile={(rel) => setOpenFile(`${cwd}/${rel}`)}
+        onCopyPath={copyPath}
+      />
+    </div>
   );
 }
 

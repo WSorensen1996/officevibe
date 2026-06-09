@@ -103,8 +103,10 @@ export interface QueuedMessage {
 /** Which view fills the left column. `office` is the floor + memory overlay and
  *  `browser` is the shared native browser pane; the next two are the selected
  *  agent's workspace (its terminal and messages); `task` is the
- *  transient full-card view opened from the Kanban board (see `openTaskId`). */
-export type LeftTab = 'office' | 'terminal' | 'browser' | 'messages' | 'task';
+ *  transient full-card view opened from the Kanban board (see `openTaskId`);
+ *  `file` is the transient file viewer opened from the files tab (see
+ *  `openFilePath`). */
+export type LeftTab = 'office' | 'terminal' | 'browser' | 'messages' | 'task' | 'file';
 
 /** Sentinel `openTaskId` value meaning "the left task panel is in CREATE mode"
  *  (no real task yet). `shortId()` only ever emits `t-…` ids, so this can never
@@ -181,6 +183,10 @@ interface State {
    *  May be the `NEW_TASK_ID` sentinel to mean CREATE mode (no real task yet).
    *  Transient (not persisted). */
   openTaskId: string | null;
+  /** Absolute path of the file open in the left-column transient `file` view, or
+   *  null. Set by clicking a file in the right-panel files tab; mirrors
+   *  `fullscreenFilePath` but drives the LEFT pane. Transient (not persisted). */
+  openFilePath: string | null;
   /** Prefill for the next CREATE-mode task form — set when spinning a new task
    *  out of selected result text, consumed by AddTaskForm. Cleared whenever the
    *  full-card view closes OR the user opens any other card / a blank "add task"
@@ -243,6 +249,9 @@ interface State {
   setAddAgentOpen: (open: boolean) => void;
   setFullscreen: (id: string | null) => void;
   setFullscreenFile: (path: string | null) => void;
+  /** Open a file in the left-column transient `file` view (absolute path), or
+   *  close it (null) and restore the previous tab — mirrors `openTask`. */
+  setOpenFile: (path: string | null) => void;
   setSidebarWidth: (px: number) => void;
   setLeftTab: (tab: LeftTab) => void;
   /** Open a task's full card (a single editable view) in the left column,
@@ -461,6 +470,7 @@ export const useStore = create<State>((set) => ({
   sidebarWidth: initialSidebarWidth,
   leftTab: initialLeftTab,
   openTaskId: null,
+  openFilePath: null,
   newTaskSeed: null,
   taskDraft: null,
   prevLeftTab: initialLeftTab,
@@ -604,10 +614,11 @@ export const useStore = create<State>((set) => ({
     set({ sidebarWidth: clamped });
   },
   setLeftTab: (tab) => {
-    // The transient `task` view is never persisted — a reload must never land on
-    // a full-card view for a task that may no longer exist (initialLeftTab's
-    // whitelist also excludes it as a second line of defense).
-    if (tab !== 'task') {
+    // The transient `task` / `file` views are never persisted — a reload must
+    // never land on a full-card view for a task or a file path that may no longer
+    // exist (initialLeftTab's whitelist also excludes them as a second line of
+    // defense).
+    if (tab !== 'task' && tab !== 'file') {
       try { window.localStorage.setItem(LS_LEFT_TAB, tab); } catch { /* noop */ }
     }
     set({ leftTab: tab });
@@ -633,6 +644,17 @@ export const useStore = create<State>((set) => ({
         newTaskSeed: id === NEW_TASK_ID ? s.newTaskSeed : null,
         taskDraft: null
       };
+    }),
+  setOpenFile: (path) =>
+    set((s) => {
+      if (path === null) {
+        // Closing returns to the tab the user was on before opening the file.
+        return { openFilePath: null, leftTab: s.leftTab === 'file' ? s.prevLeftTab : s.leftTab };
+      }
+      // Stash the current real tab once so closing restores it — but don't stash
+      // a transient view (task/file) as the "return to" tab.
+      const prevLeftTab = (s.leftTab === 'task' || s.leftTab === 'file') ? s.prevLeftTab : s.leftTab;
+      return { openFilePath: path, leftTab: 'file', prevLeftTab };
     }),
   setNewTaskSeed: (seed) => set({ newTaskSeed: seed }),
   setTaskDraft: (draft) => set({ taskDraft: draft }),

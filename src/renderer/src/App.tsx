@@ -23,6 +23,7 @@ import { BrowserPane } from '@/components/BrowserPane';
 import { acquireTerminal } from '@/components/terminalPool';
 import { FullscreenTerminal } from '@/components/FullscreenTerminal';
 import { FullscreenFileEditor } from '@/components/FullscreenFileEditor';
+import { LeftFileEditor } from '@/components/LeftFileEditor';
 import { TaskDetailPanel } from '@/components/TaskDetailPanel';
 
 /** The window is frameless on macOS (titleBarStyle: hiddenInset) and the in-app
@@ -50,6 +51,7 @@ export function App() {
   const select = useStore(s => s.select);
   const selectedId = useStore(s => s.selectedId);
   const openTaskId = useStore(s => s.openTaskId);
+  const openFilePath = useStore(s => s.openFilePath);
   const browserActive = useStore(s => s.browserActive);
   // Any agent blocked on a prompt lights the Messages-tab badge (the request lives
   // in that agent's messages). Clicking the tab jumps to the blocked agent so it's
@@ -262,6 +264,7 @@ export function App() {
             messagesNeedsYou={!!blockedAgent}
             accent={agent?.accent}
             hasOpenTask={!!openTaskId}
+            hasOpenFile={!!openFilePath}
           />
 
           <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
@@ -336,6 +339,14 @@ export function App() {
             {leftTab === 'task' && (
               <div style={{ position: 'absolute', inset: 0 }}>
                 <TaskDetailPanel />
+              </div>
+            )}
+
+            {/* File viewer — a file picked from the right-column files tab opens
+                here (transient `file` tab). Editable; plain DOM, cheap to mount. */}
+            {leftTab === 'file' && (
+              <div style={{ position: 'absolute', inset: 0 }}>
+                <LeftFileEditor projectRoot={config?.activeProjectPath} />
               </div>
             )}
           </div>

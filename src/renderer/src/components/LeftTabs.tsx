@@ -24,6 +24,9 @@ export interface LeftTabsProps {
   /** A task's full card is open — append a transient TASK tab to the bar. It
    *  disappears again when the card is closed (the tab is never persisted). */
   hasOpenTask?: boolean;
+  /** A file is open in the left pane — append a transient FILE tab to the bar.
+   *  Disappears when the file is closed (the tab is never persisted). */
+  hasOpenFile?: boolean;
 }
 
 /**
@@ -33,11 +36,14 @@ export interface LeftTabsProps {
  * working, interleaved with its mail — is one click away. A pulsing dot appears on
  * the Browser tab while Michael is browsing and you're looking at another tab.
  */
-export function LeftTabs({ current, onChange, browserActive, messagesNeedsYou, accent, hasOpenTask }: LeftTabsProps) {
-  // The TASK tab is transient — only present while a card is open, appended last.
-  const tabs = hasOpenTask
-    ? [...TABS, { key: 'task' as const, label: 'task', icon: 'expand' as IconName }]
-    : TABS;
+export function LeftTabs({ current, onChange, browserActive, messagesNeedsYou, accent, hasOpenTask, hasOpenFile }: LeftTabsProps) {
+  // The TASK and FILE tabs are transient — only present while a card / file is
+  // open, appended last (task before file).
+  const tabs = [
+    ...TABS,
+    ...(hasOpenTask ? [{ key: 'task' as const, label: 'task', icon: 'expand' as IconName }] : []),
+    ...(hasOpenFile ? [{ key: 'file' as const, label: 'file', icon: 'code' as IconName }] : [])
+  ];
   return (
     <div style={{
       display: 'flex',
