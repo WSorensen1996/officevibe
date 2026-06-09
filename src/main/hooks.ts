@@ -24,6 +24,44 @@ import type { KnowledgeManager } from './knowledge';
 const ALWAYS_ALLOW = new Set([
   'Read', 'Grep', 'Glob', 'NotebookRead', 'TodoWrite', 'BashOutput', 'WebSearch'
 ]);
+
+// ─── Hybrid approval model (task t-mq70hfiq-lfoa) ──────────────────────────────
+// Goal: the user NEVER approves in an agent's terminal. Everything safe — edits,
+// reads, builds, and ALL MCP tools — auto-approves silently. Only genuinely RISKY
+// actions (destructive or outbound/irreversible) surface as the in-app approval
+// card, which is approvable from the UI or the phone (/remote-control). A risky
+// action is gated even under full-auto (autoMode).
+//
+// Risky Bash commands: deletes, history/remote rewrites, disk/permission changes,
+// privilege escalation, process/power control, pipe-to-shell, publish/deploy.
+const RISKY_BASH: RegExp[] = [
+  /\brm\b/, /\brmdir\b/, /\bunlink\b/, /\bshred\b/,
+  /\bgit\s+push\b/, /\bgit\s+reset\s+--hard\b/, /\bgit\s+clean\s+-[a-z]*f/, /\bgit\s+branch\s+-D\b/,
+  /\bdd\b\s+if=/, /\bmkfs\b/, /\bchmod\s+-R\b/, /\bchown\s+-R\b/,
+  /\bsudo\b/, /\bsu\s/,
+  /\bkill(all)?\b/, /\bpkill\b/, /\bshutdown\b/, /\breboot\b/, /\bhalt\b/,
+  /\|\s*(sh|bash|zsh)\b/, /\b(curl|wget)\b[^|]*\|/,
+  /\b(npm|yarn|pnpm)\s+publish\b/, /\bdocker\s+push\b/, /\bgh\s+release\b/, /\bnpm\s+run\s+deploy\b/
+];
+// Risky MCP tool name fragments: external sends / deletes / payments. The MCP tool
+// id is `mcp__<server>__<action>`, so a substring match on the lowercased id flags
+// e.g. gmail send, slack post, calendar/drive delete, a payment charge.
+const RISKY_MCP = ['send', 'delete', 'remove', 'trash', 'payment', 'charge', 'transfer', 'publish', 'post'];
+
+/** True when a tool call is destructive/outbound and should surface the approval
+ *  card even under autoMode. Read/search/edit tools and read-only MCP are safe. */
+function isRiskyAction(tool: string, input: unknown): boolean {
+  if (tool === 'Bash') {
+    const cmd = (input && typeof input === 'object' && 'command' in input)
+      ? String((input as { command?: unknown }).command ?? '') : '';
+    return RISKY_BASH.some((re) => re.test(cmd));
+  }
+  if (tool.startsWith('mcp__')) {
+    const t = tool.toLowerCase();
+    return RISKY_MCP.some((v) => t.includes(v));
+  }
+  return false;
+}
 // How long a pending permission request waits for the human before we fall through
 // to Claude's native terminal prompt. MUST stay below both the PreToolUse hook
 // `timeout` in settings.json and the shim's self-kill (see project.ts), so this
@@ -209,34 +247,39 @@ export class HookServer {
   }
 
   /**
-   * PreToolUse permission gate. Emits the avatar event, then decides: defer MCP
-   * tools to Claude's own allow-rules (no UI), auto-allow safe/read-only tools and
-   * everything under autoMode, or hold the hook socket open and ask the human via a
-   * structured card in the renderer. The structured `tool_input` is forwarded so the
-   * card shows the exact command/file/url — no terminal scraping.
+   * PreToolUse permission gate (Hybrid model — task t-mq70hfiq-lfoa). Emits the
+   * avatar event, then: genuinely RISKY actions (destructive/outbound) always go to
+   * the in-app approval card — even under autoMode; everything SAFE (read-only tools,
+   * all MCP, and everything under autoMode) auto-approves silently with no terminal
+   * prompt; in manual mode (autoMode off) a non-safe tool also asks via the card.
+   * The card is approvable from the UI or the phone, so the user NEVER has to drop
+   * into an agent's terminal. The structured `tool_input` is forwarded so the card
+   * shows the exact command/file/url — no terminal scraping.
    */
   private handlePreToolUse(p: HookPayload, conn: Socket): void {
     const agentId = p.agent_id ?? undefined;
     this.emit(agentId, 'PreToolUse', p); // keep avatars live (station / carry)
 
     const tool = p.tool_name ?? '';
-    // Granted MCP servers are pre-approved via settings.permissions.allow
-    // (mcp__<name>__*); defer so Claude's allow-rule lets them through with no UI.
-    if (tool.startsWith('mcp__')) { conn.end('{}'); return; }
-    // autoMode (full-auto) or a read-only/safe tool → allow with no prompt.
-    if (this.getConfig().autoMode || ALWAYS_ALLOW.has(tool)) {
+    const risky = isRiskyAction(tool, p.tool_input);
+    // Safe path: auto-approve with no prompt. Covers ALL MCP tools (so non-granted
+    // servers never prompt in the terminal), read-only/safe tools, and — when
+    // full-auto is on — everything else. Risky actions skip this and fall through
+    // to the card below regardless of autoMode.
+    if (!risky && (tool.startsWith('mcp__') || this.getConfig().autoMode || ALWAYS_ALLOW.has(tool))) {
       conn.end(JSON.stringify(allowDecision('auto-approved')));
       return;
     }
-    // Needs a human. With no live window to ask, defer to the native terminal prompt.
+    // Needs a human via the in-app card. With no live window we can't show it; to
+    // keep the no-terminal guarantee we DENY rather than fall through to the TUI.
     const wc = this.getWebContents();
-    if (!wc) { conn.end('{}'); return; }
+    if (!wc) { conn.end(JSON.stringify(preToolDecision('deny', 'no UI available to approve — denied'))); return; }
     const requestId = randomUUID();
     const timer = setTimeout(() => this.onTimeout(requestId), PERMISSION_TIMEOUT_MS);
     this.pending.set(requestId, { conn, agentId, timer });
     conn.on('close', () => this.discard(requestId));
     conn.on('error', () => this.discard(requestId));
-    wc.send('permission:request', { requestId, agentId, tool, input: p.tool_input, cwd: p.cwd });
+    wc.send('permission:request', { requestId, agentId, tool, input: p.tool_input, cwd: p.cwd, risky });
   }
 
   /** Resolve a pending permission request with the user's verdict and write the
@@ -250,14 +293,15 @@ export class HookServer {
     catch { /* socket already gone */ }
   }
 
-  /** The human was slower than PERMISSION_TIMEOUT_MS → fall through to Claude's
-   *  native prompt ('ask') and tell the renderer to clear the card. */
+  /** The human was slower than PERMISSION_TIMEOUT_MS. Hybrid model: never fall
+   *  through to the terminal — DENY (re-run to retry) and clear the card. The card
+   *  is remote-approvable, so the 30-min window is ample. */
   private onTimeout(requestId: string): void {
     const e = this.pending.get(requestId);
     if (!e) return;
     clearTimeout(e.timer);
     this.pending.delete(requestId);
-    try { e.conn.end(JSON.stringify(preToolDecision('ask', 'timed out — answer in the terminal'))); }
+    try { e.conn.end(JSON.stringify(preToolDecision('deny', 'timed out — denied; re-run to retry'))); }
     catch { /* gone */ }
     try { this.getWebContents()?.send('permission:resolved', { requestId, timedOut: true }); }
     catch { /* window torn down */ }

@@ -409,8 +409,8 @@ export function useProject(config: HarnessConfig | null): void {
         updateAgent(target.id, {
           status: 'blocked', action: 'waiting on you', currentStation: 'mailbox',
           blockReason: {
-            summary: 'Approval timed out',
-            detail: 'Answer the prompt in the agent’s terminal, or reply below.',
+            summary: 'Approval timed out — denied',
+            detail: 'The request was denied after 30 min. Ask the agent to retry, or reply below.',
             promptKind: 'text', actions: []
           }
         });

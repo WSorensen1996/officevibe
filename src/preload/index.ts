@@ -427,9 +427,9 @@ const api = {
   /** An agent's PreToolUse hook is blocked awaiting the user's approval. Carries the
    *  exact tool + structured input so the card shows precisely what's being approved. */
   onPermissionRequest: (
-    cb: (e: { requestId: string; agentId?: string; tool: string; input?: unknown; cwd?: string }) => void
+    cb: (e: { requestId: string; agentId?: string; tool: string; input?: unknown; cwd?: string; risky?: boolean }) => void
   ): (() => void) => {
-    const listener = (_e: IpcRendererEvent, payload: { requestId: string; agentId?: string; tool: string; input?: unknown; cwd?: string }) => cb(payload);
+    const listener = (_e: IpcRendererEvent, payload: { requestId: string; agentId?: string; tool: string; input?: unknown; cwd?: string; risky?: boolean }) => cb(payload);
     ipcRenderer.on('permission:request', listener);
     return () => ipcRenderer.removeListener('permission:request', listener);
   },

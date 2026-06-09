@@ -13,6 +13,9 @@ export interface PermissionRequest {
   tool: string;
   input?: unknown;
   cwd?: string;
+  /** Hybrid model: true when the action is destructive/outbound (delete, push,
+   *  payment, external send) — the only class that surfaces a card under autoMode. */
+  risky?: boolean;
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -74,8 +77,10 @@ export function permissionCard(req: PermissionRequest): BlockReason {
   }
 
   return {
-    summary,
-    detail: 'Approve to let the agent proceed, or deny and tell it what to do instead.',
+    summary: req.risky ? `⚠ Risky · ${summary}` : summary,
+    detail: req.risky
+      ? 'This is a destructive or outbound action. Approve to let the agent proceed, or deny and tell it what to do instead.'
+      : 'Approve to let the agent proceed, or deny and tell it what to do instead.',
     command: command || undefined,
     promptKind: 'menu',
     requestId: req.requestId,
