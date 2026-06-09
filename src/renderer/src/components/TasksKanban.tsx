@@ -990,6 +990,23 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
     setTaskDraft({ title, description, assignee, priority, deps, id: createId, attachments, planMode });
   }, [editing, setTaskDraft, title, description, assignee, priority, deps, createId, attachments, planMode]);
 
+  // Keyboard shortcut: ⌘/Ctrl+Shift+P toggles plan mode (mirrors ticking the
+  // checkbox below). The modifier combo means it never types a character, so it's
+  // safe to fire even while the title/description field is focused — toggle plan
+  // mode mid-typing without reaching for the mouse. Mirrors MicButton's
+  // ⌘/Ctrl+Shift+M. The effect unmounts with the form, so there's no global
+  // collision (Cmd+P / plain P are untouched).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        setPlanMode((p) => !p);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   // The title is optional when CREATING — a new task just needs *something*
   // (a title or a description), and a blank title is derived from the description
   // in buildTask. EDITING still requires a title so a saved task can't lose its

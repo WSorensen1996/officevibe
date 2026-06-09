@@ -51,6 +51,7 @@ const SHORTCUT_GROUPS: { group: string; items: { keys: string[]; label: string }
     items: [
       { keys: ['⌘/Ctrl', '↵'], label: 'Create & dispatch the task' },
       { keys: ['↵'], label: 'Create the task (from the title field)' },
+      { keys: ['⌘/Ctrl', 'Shift', 'P'], label: 'Toggle plan mode in the task form' },
       { keys: ['Esc'], label: 'Close the task view' }
     ]
   },
