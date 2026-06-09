@@ -22,6 +22,9 @@ export interface FileTreeProps {
   root: string;
   /** Active file (relative path, no leading slash) */
   activeRel?: string;
+  /** Shown (muted) when the root is empty or missing — friendlier than an error,
+   *  e.g. the focused workspace view before any agent has dropped a file there. */
+  emptyHint?: string;
   onOpenFile: (rel: string) => void;
   onCopyPath: (rel: string) => void;
 }
@@ -34,7 +37,7 @@ function fmtSize(n: number): string {
 
 const HIDE_PATTERNS = [/^\.git$/, /^node_modules$/, /^out$/, /^dist$/];
 
-export function FileTree({ root, activeRel, onOpenFile, onCopyPath }: FileTreeProps) {
+export function FileTree({ root, activeRel, emptyHint, onOpenFile, onCopyPath }: FileTreeProps) {
   const [tree, setTree] = useState<NodeState>({
     rel: '', name: 'root', isDir: true, expanded: true
   });
@@ -103,11 +106,16 @@ export function FileTree({ root, activeRel, onOpenFile, onCopyPath }: FileTreePr
   const renderNode = (node: NodeState, depth: number): React.ReactNode => {
     if (node.rel === '' && depth === 0) {
       // Render children of root only
+      // Empty/missing root: prefer a friendly hint (focused workspace view) over a
+      // raw error. Only show the coral error when no hint is supplied (full tree).
+      const isEmpty = !node.loading && (node.children?.length ?? 0) === 0;
       return (
         <div>
           {node.children?.map(c => renderNode(c, 0))}
           {node.loading && <div style={{ padding: 8, fontSize: 13, color: 'var(--cth-ink-500)' }}>loading…</div>}
-          {node.error && <div style={{ padding: 8, fontSize: 13, color: 'var(--cth-coral)' }}>{node.error}</div>}
+          {isEmpty && emptyHint
+            ? <div style={{ padding: 12, fontSize: 13, color: 'var(--cth-ink-500)', textAlign: 'center', lineHeight: '18px' }}>{emptyHint}</div>
+            : node.error && <div style={{ padding: 8, fontSize: 13, color: 'var(--cth-coral)' }}>{node.error}</div>}
         </div>
       );
     }

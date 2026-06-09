@@ -305,6 +305,13 @@ export class ProjectManager {
     mkdirSync(join(root, 'knowledge', 'patches', '.done'), { recursive: true });
     mkdirSync(join(root, 'knowledge', 'deliverables'), { recursive: true });
 
+    // The user-facing "your content" folder (task t-mq6yp0yo-6zpp). The Files tab
+    // defaults to showing ONLY this folder, so the project's config/scaffolding
+    // stays hidden; agents place artifacts they make FOR the human (plans,
+    // visualizations, generated docs) here. Ensured on every load so existing
+    // projects get it too (and the focused Files view never hits a missing dir).
+    mkdirSync(join(root, 'workspace'), { recursive: true });
+
     // The hook shim: a dumb pipe between a `claude` hook and our UDS. The usage
     // shim: a `statusLine` command that records Claude's 5h/7d limit usage.
     // Both refreshed on every bootstrap so they track code changes.
@@ -641,7 +648,7 @@ export class ProjectManager {
 
   private injectedPrompt(meta: AgentMeta, dir: string, root: string, semanticMemory: boolean, knowledge: boolean): string {
     const skillsLine = knowledge
-      ? '6. The team shares a growing SKILL library — reusable how-to for THIS project. At task START you get a "PROJECT SKILLS" note listing the WHOLE library (★ = most relevant to your task); to use one, load its full procedure with the Skill tool (by its name/slug) and follow it before reinventing. CAPTURE at task END: if you discovered a REUSABLE procedure future tasks will repeat, write ONE JSON file into your outbox shaped {"type":"skill-proposal","slug":"kebab-name","title":"short title","description":"<=80 chars on what it does","tags":["topic"],"body":"# Title\\n## When to Use\\n…\\n## Procedure\\n1. …\\n## Pitfalls\\nfailure modes + fixes\\n## Verification\\nhow to confirm it worked"} — keep those four sections. CORRECT in-flight: if you find a skill wrong/incomplete WHILE using it, fix it immediately — outbox {"type":"skill-patch","slug":"<slug>","append":"what was wrong + the corrected steps"} (or "body" to fully rewrite). Reusable PROCEDURES only: one-off facts go in memory.md, and investigation reports / briefs / research DELIVERABLES go in $KNOWLEDGE_DIR/deliverables/<name>.md (NOT loose in $KNOWLEDGE_DIR, and NOT as skills).'
+      ? '6. The team shares a growing SKILL library — reusable how-to for THIS project. At task START you get a "PROJECT SKILLS" note listing the WHOLE library (★ = most relevant to your task); to use one, load its full procedure with the Skill tool (by its name/slug) and follow it before reinventing. CAPTURE at task END: if you discovered a REUSABLE procedure future tasks will repeat, write ONE JSON file into your outbox shaped {"type":"skill-proposal","slug":"kebab-name","title":"short title","description":"<=80 chars on what it does","tags":["topic"],"body":"# Title\\n## When to Use\\n…\\n## Procedure\\n1. …\\n## Pitfalls\\nfailure modes + fixes\\n## Verification\\nhow to confirm it worked"} — keep those four sections. CORRECT in-flight: if you find a skill wrong/incomplete WHILE using it, fix it immediately — outbox {"type":"skill-patch","slug":"<slug>","append":"what was wrong + the corrected steps"} (or "body" to fully rewrite). Reusable PROCEDURES only: one-off facts go in memory.md, and investigation reports / briefs / research DELIVERABLES go in $KNOWLEDGE_DIR/deliverables/<name>.md (NOT loose in $KNOWLEDGE_DIR, and NOT as skills). Artifacts you make FOR THE HUMAN — finished plans, documents, visualizations, generated files/apps — go in $PROJECT_ROOT/workspace/ so they are easy to find (the user\'s Files view shows only that folder by default). Internal investigation deliverables still go in $KNOWLEDGE_DIR/deliverables/. You may always write elsewhere when explicitly told to.'
       : '';
     const memoryLine = semanticMemory
       ? 'Semantic memory: the whole team shares a searchable MemPalace at $MEMPALACE_PALACE_PATH. To recall relevant past knowledge across the team, run `mempalace search "<query>"`; run `mempalace wake-up` at the start of a task for a memory digest. Your notes in memory.md are mined into the palace automatically — write durable facts there.'

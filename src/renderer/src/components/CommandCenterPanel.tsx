@@ -121,26 +121,54 @@ export function CommandCenterPanel({ agent }: { agent: Agent }) {
 
 // ─── Files tab ───────────────────────────────────────────────────────────────
 
-/** Project file browser. Lists the active project's tree (rooted at the god
- *  agent's cwd = the active project) via the fs:listDir IPC; clicking a file
- *  opens it in the LEFT pane (the transient `file` tab), not fullscreen. */
+/** Project file browser. Defaults to a FOCUSED view of just `workspace/` — the
+ *  user-facing folder where agents place artifacts they make for the human (plans,
+ *  visualizations, generated docs) — so the project's config/scaffolding (agents/,
+ *  knowledge/, *.json, …) stays out of sight. A "Show all files" toggle reveals the
+ *  full project tree. Clicking a file opens it in the LEFT pane (the transient
+ *  `file` tab), not fullscreen. (task t-mq6yp0yo-6zpp) */
 function ProjectFilesTab({ cwd }: { cwd: string }) {
   const setOpenFile = useStore((s) => s.setOpenFile);
   const openFilePath = useStore((s) => s.openFilePath);
-  // Highlight the open file in the tree when it's within this project root.
-  const activeRel = openFilePath && (openFilePath === cwd || openFilePath.startsWith(cwd + '/'))
-    ? openFilePath.slice(cwd.length + 1)
+  const [showAll, setShowAll] = useState(false);
+  // Focused = the workspace/ subfolder; full = the project root. `workspace/` is
+  // scaffolded on project create + ensured on every load, so it's always present.
+  const root = showAll ? cwd : `${cwd}/workspace`;
+  // Highlight the open file in the tree when it's within the CURRENT root.
+  const activeRel = openFilePath && (openFilePath === root || openFilePath.startsWith(root + '/'))
+    ? openFilePath.slice(root.length + 1)
     : undefined;
   const copyPath = (rel: string) => {
-    const abs = rel ? `${cwd}/${rel}` : cwd;
+    const abs = rel ? `${root}/${rel}` : root;
     navigator.clipboard.writeText(abs).catch(() => { /* noop */ });
   };
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--cth-paper-200)' }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', flexShrink: 0,
+        borderBottom: '1px solid var(--cth-ink-300)'
+      }}>
+        <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 9, color: 'var(--cth-ink-500)' }}>
+          {showAll ? 'ALL PROJECT FILES' : 'WORKSPACE · your content'}
+        </span>
+        <button
+          onClick={() => setShowAll((v) => !v)}
+          title={showAll ? 'Show only the workspace folder' : 'Show the full project tree (config + scaffolding)'}
+          style={{
+            marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 3,
+            padding: '1px 6px 0', border: 'none', cursor: 'pointer',
+            background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
+            fontFamily: 'var(--cth-font-display)', fontSize: 8, textTransform: 'uppercase',
+            color: 'var(--cth-ink-900)'
+          }}
+        >{showAll ? 'focus workspace' : 'show all files'}</button>
+      </div>
       <FileTree
-        root={cwd}
+        key={root}
+        root={root}
         activeRel={activeRel}
-        onOpenFile={(rel) => setOpenFile(`${cwd}/${rel}`)}
+        emptyHint={showAll ? undefined : 'Agent-created plans, visualizations and docs appear here.'}
+        onOpenFile={(rel) => setOpenFile(`${root}/${rel}`)}
         onCopyPath={copyPath}
       />
     </div>
