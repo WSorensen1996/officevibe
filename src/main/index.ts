@@ -580,9 +580,13 @@ function dispatchMissionMessage(m: ScheduledMission): { skipped: boolean } {
     const task = (data.tasks ?? []).find((t) => t.id === m.taskId);
     if (!task) return { skipped: true };
     const desc = task.description?.trim() ? task.description.trim() : '(no description)';
+    // Mirror the renderer's dispatchBody: append the reference (source context kept
+    // out of the visible description) as a labeled block so a SCHEDULED dispatch
+    // still hands the agent the same context as a manual one.
+    const ref = task.reference?.trim() ? `\nReference (source context):\n${task.reference.trim()}` : '';
     to = task.assignee ?? 'god';
     subject = 'Task from you';
-    body = `Task: ${task.title} [task:${task.id}]\nContext: ${desc}\n`;
+    body = `Task: ${task.title} [task:${task.id}]\nContext: ${desc}${ref}\n`;
   }
   if (hive.enabled()) {
     hive.send({ to, act: 'request', subject, body }, 'scheduler');

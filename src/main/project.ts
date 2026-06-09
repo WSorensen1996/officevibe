@@ -71,6 +71,9 @@ export interface ProjectTask {
   id: string;
   title: string;
   description?: string;
+  /** Source context appended to the agent's dispatch body but kept out of the
+   *  visible description (renderer-owned; round-trips via the writeTasks `...t`). */
+  reference?: string;
   assignee?: string;
   status: 'todo' | 'doing' | 'blocked' | 'needs-approval' | 'done';
   dependsOn: string[];

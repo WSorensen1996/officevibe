@@ -188,9 +188,10 @@ function Deliverables({ slugs }: { slugs: string[] }) {
 
 /** Wraps the result/updates region and, on a non-empty text selection, floats a
  *  "new task from selection" button next to the cursor. Clicking seeds the CREATE
- *  form with the selected text + a back-reference, links the new task as depending
- *  on this one, and opens create mode. The button stops mousedown propagation so
- *  the wrapper's clear-on-mousedown doesn't kill it before the click lands. */
+ *  form's `reference` (sent to the agent, kept out of the description) with the
+ *  selected text + a back-reference, links the new task as depending on this one,
+ *  and opens create mode. The button stops mousedown propagation so the wrapper's
+ *  clear-on-mousedown doesn't kill it before the click lands. */
 function SelectionToTask({ task, children }: { task: { id: string; title: string }; children: React.ReactNode }) {
   const setNewTaskSeed = useStore((s) => s.setNewTaskSeed);
   const openTask = useStore((s) => s.openTask);
@@ -206,8 +207,10 @@ function SelectionToTask({ task, children }: { task: { id: string; title: string
 
   const create = (): void => {
     if (!pin) return;
-    const description = `${pin.text}\n\n— from task "${task.title}" [task:${task.id}]`;
-    setNewTaskSeed({ description, dependsOn: [task.id] });
+    // The selected text rides as `reference` (sent to the agent on dispatch), NOT
+    // as the description — so the new task's description starts clean for the user.
+    const reference = `${pin.text}\n\n— from task "${task.title}" [task:${task.id}]`;
+    setNewTaskSeed({ reference, dependsOn: [task.id] });
     setPin(null);
     openTask(NEW_TASK_ID);
   };
@@ -442,9 +445,10 @@ export function TaskDetailPanel() {
               updates={updates}
               nameFor={nameFor}
               onNewTaskFromUpdate={(u) => {
-                // Seed a new task quoting this update and linking back to THIS task.
+                // Quote this update as the new task's `reference` (sent to the agent,
+                // not the description) and link back to THIS task.
                 setNewTaskSeed({
-                  description: `Re: ${task.title} — update (${nameFor(u.by) ?? u.by ?? 'agent'}): "${u.text}"`,
+                  reference: `Re: ${task.title} — update (${nameFor(u.by) ?? u.by ?? 'agent'}): "${u.text}"`,
                   dependsOn: [task.id]
                 });
                 openTask(NEW_TASK_ID);

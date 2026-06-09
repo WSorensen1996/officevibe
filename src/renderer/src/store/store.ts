@@ -117,6 +117,11 @@ export const NEW_TASK_ID = '__new__';
  *  selected sentence from a finished task's result into a new task. */
 export interface NewTaskSeed {
   description?: string;
+  /** Source text carried as the new task's `reference` (NOT prefilled into the
+   *  visible description) — e.g. the selected sentence a "new task from selection"
+   *  was spun from. Kept out of the description to keep the form clean, but still
+   *  sent to the agent as context on dispatch. */
+  reference?: string;
   /** Task ids the new task should depend on (the source task, for provenance). */
   dependsOn?: string[];
 }
@@ -142,6 +147,9 @@ export interface TaskDraft {
   attachments?: TaskAttachment[];
   /** Plan-mode flag, preserved across a tab flick like the other draft fields. */
   planMode?: boolean;
+  /** Reference text (source context sent to the agent, not the description),
+   *  preserved across a tab flick like the other draft fields. */
+  reference?: string;
 }
 
 /** The left tabs that render the selected agent's workspace (vs the shared

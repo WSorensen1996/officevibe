@@ -827,8 +827,9 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   /** When set, the form edits this task instead of creating a new one. */
   initial?: ProjectTask;
   /** Prefill for a NEW task (create mode only — never sets `editing`). Used by
-   *  "new task from selection" to seed the description + a back-reference dep. */
-  seed?: { description?: string; dependsOn?: string[] };
+   *  "new task from selection": `reference` carries the source text (sent to the
+   *  agent, NOT prefilled into the description) plus a back-reference dep. */
+  seed?: { description?: string; reference?: string; dependsOn?: string[] };
   /** The task's current schedule, if any — seeds the SCHEDULE controls. */
   initialMission?: ScheduledMission;
   onCancel: () => void;
@@ -852,6 +853,10 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   const [draft0] = useState(() => (initial ? null : useStore.getState().taskDraft));
   const [title, setTitle] = useState(initial?.title ?? draft0?.title ?? '');
   const [description, setDescription] = useState(initial?.description ?? draft0?.description ?? seed?.description ?? '');
+  // Reference: source context (e.g. the text a "new task from selection" was spun
+  // from). Held SEPARATE from the description so the description field stays clean
+  // for the user, but still sent to the agent on dispatch (see dispatchBody).
+  const [reference, setReference] = useState(initial?.reference ?? draft0?.reference ?? seed?.reference ?? '');
   // New tasks get a WORKLOAD-AWARE default (pickAutoAssignee, task bii2): Michael
   // when he's free, else the least-loaded live teammate — so work spreads instead
   // of always piling on Michael. Still an editable <select> (the human overrides).
@@ -960,6 +965,7 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
     // task is never stored (or shown on the board) without a name.
     title: title.trim() || deriveTitleFromDescription(description),
     description: description.trim() || undefined,
+    reference: reference.trim() || undefined,
     assignee: assignee || undefined,
     status: editing ? status : 'todo',
     dependsOn: deps,
@@ -987,8 +993,8 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   // a left-tab switch (read back by `draft0` on remount). No-op while editing.
   useEffect(() => {
     if (editing) return;
-    setTaskDraft({ title, description, assignee, priority, deps, id: createId, attachments, planMode });
-  }, [editing, setTaskDraft, title, description, assignee, priority, deps, createId, attachments, planMode]);
+    setTaskDraft({ title, description, assignee, priority, deps, id: createId, attachments, planMode, reference });
+  }, [editing, setTaskDraft, title, description, assignee, priority, deps, createId, attachments, planMode, reference]);
 
   // Keyboard shortcut: ⌘/Ctrl+Shift+P toggles plan mode (mirrors ticking the
   // checkbox below). The modifier combo means it never types a character, so it's
@@ -1128,6 +1134,29 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
             />
           </div>
         </div>
+        {reference.trim() && (
+          <div>
+            <div style={{ ...labelStyle, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ flex: 1 }}>reference — sent to the agent, not shown as the description</span>
+              <button
+                type="button"
+                onClick={() => setReference('')}
+                title="Remove this reference (it won't be sent to the agent)"
+                style={{
+                  padding: '1px 6px', border: 'none', cursor: 'pointer',
+                  background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+                  fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-700)'
+                }}
+              >remove</button>
+            </div>
+            <div style={{
+              maxHeight: 110, overflow: 'auto', padding: '6px 8px',
+              background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+              fontFamily: 'var(--cth-font-mono)', fontSize: 12, lineHeight: '16px',
+              color: 'var(--cth-ink-500)', whiteSpace: 'pre-wrap', wordBreak: 'break-word'
+            }}>{reference}</div>
+          </div>
+        )}
         {attachError && (
           <div style={{ fontSize: 11, lineHeight: '14px', color: 'var(--cth-coral)' }}>attach failed: {attachError}</div>
         )}

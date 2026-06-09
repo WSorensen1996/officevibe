@@ -30,6 +30,12 @@ export interface ProjectTask {
   id: string;
   title: string;
   description?: string;
+  /** Source context (e.g. the text a "new task from selection" was spun from).
+   *  Deliberately NOT the description — kept out of the visible/editable
+   *  description field to keep the form clean, but appended to the agent's
+   *  dispatch context so the reference still reaches the worker. Renderer-owned;
+   *  round-trips via the writeTasks `...t` spread + the parseTasks whitelist. */
+  reference?: string;
   assignee?: string;
   status: 'todo' | 'doing' | 'blocked' | 'needs-approval' | 'done';
   dependsOn: string[];
@@ -265,6 +271,8 @@ export function parseTasks(raw: unknown): ProjectTask[] {
         : stableId(`${typeof t.title === 'string' ? t.title : ''}|${typeof t.createdAt === 'string' ? t.createdAt : ''}|${i}`),
       title: typeof t.title === 'string' ? t.title : '(untitled)',
       description: typeof t.description === 'string' ? t.description : undefined,
+      // Load-bearing: drop this on poll and the 5s poll wipes the reference context.
+      reference: typeof t.reference === 'string' ? t.reference : undefined,
       assignee: typeof t.assignee === 'string' ? t.assignee : undefined,
       status: (['todo', 'doing', 'blocked', 'needs-approval', 'done'] as const).includes(t.status as Status)
         ? (t.status as Status) : 'todo',

@@ -78,7 +78,10 @@ const PLAN_MODE_BLOCK =
  *  dispatchTask and dispatchAllTodo so both honor plan mode identically. */
 function dispatchBody(t: ProjectTask): string {
   const desc = t.description?.trim() ? t.description.trim() : '(no description)';
-  return `Task: ${t.title} [task:${t.id}]\nContext: ${desc}\n${t.planMode ? PLAN_MODE_BLOCK : ''}`;
+  // The reference (source context, kept out of the visible description) is still
+  // handed to the agent here as a clearly-labeled block when present.
+  const ref = t.reference?.trim() ? `\nReference (source context):\n${t.reference.trim()}` : '';
+  return `Task: ${t.title} [task:${t.id}]\nContext: ${desc}${ref}\n${t.planMode ? PLAN_MODE_BLOCK : ''}`;
 }
 
 const useTasksStore = create<TasksStore>((set, get) => ({
