@@ -22,6 +22,7 @@ import { readAgentUsage } from './transcript';
 import { SlackWebhookServer } from './slack';
 import { startBrowserMcp, type BrowserMcpHandle } from './browserMcp';
 import { decryptDef, encryptDef, encryptionAvailable, isValidName, testConnection, type McpServerDef } from './mcp';
+import { decryptValue } from './secrets';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 
@@ -690,10 +691,12 @@ async function startSlackServer(): Promise<{ ok: boolean; url?: string; error?: 
   if (!cfg.slackEnabled || !cfg.slackSigningSecret) {
     return { ok: false, error: 'slack disabled or missing signing secret' };
   }
+  const signingSecret = decryptValue(cfg.slackSigningSecret);
+  if (!signingSecret) return { ok: false, error: 'signing secret could not be decrypted' };
   slackServer?.stop();
   slackServer = new SlackWebhookServer({
     port: cfg.slackPort && cfg.slackPort > 0 ? cfg.slackPort : 3847,
-    signingSecret: cfg.slackSigningSecret,
+    signingSecret,
     channelId: cfg.slackChannelId,
     // Fires from the HTTP server's event loop (not the IPC thread); route through
     // liveWebContents() so a message arriving during window teardown can't throw.
@@ -928,7 +931,9 @@ const CONFIG_KEYS: ReadonlySet<string> = new Set([
   'semanticMemory', 'embeddingModel', 'skillLearning', 'curatorIntervalMinutes',
   'skillStaleAfterDays', 'skillArchiveAfterDays', 'maxInjectedSkills', 'skillInventoryTokenBudget',
   'curatorBackupKeep', 'curatorUsageCeilingPercent', 'sttModel', 'autoApprove', 'missions',
-  'notifications', 'slackEnabled', 'slackSigningSecret', 'slackChannelId', 'slackPort', 'mcpServers'
+  'notifications', 'slackEnabled', 'slackChannelId', 'slackPort', 'mcpServers'
+  // NB: slackSigningSecret is intentionally NOT here — it is set only via the
+  // dedicated slack:setConfig handler (which seals it), never the generic update.
 ]);
 /** Shell-significant characters that have no place in a bare command name. */
 const SHELL_META = /[;&|`$(){}<>\n\r]/;
@@ -945,8 +950,17 @@ function sanitizeConfigPatch(patch: unknown): Partial<HarnessConfig> {
   }
   return out as Partial<HarnessConfig>;
 }
-ipcMain.handle('config:get', (): HarnessConfig => readConfig());
-ipcMain.handle('config:update', (_evt, patch: unknown) => writeConfig(sanitizeConfigPatch(patch)));
+/** What the renderer is allowed to see: the full config minus the Slack signing
+ *  secret, which is replaced by a `slackSecretSet` boolean. The secret (encrypted
+ *  at rest) never crosses the IPC boundary — the README's "never sent to the
+ *  renderer" guarantee depends on every config-returning handler going through this. */
+type RedactedConfig = Omit<HarnessConfig, 'slackSigningSecret'> & { slackSecretSet: boolean };
+function redactConfig(cfg: HarnessConfig): RedactedConfig {
+  const { slackSigningSecret, ...rest } = cfg;
+  return { ...rest, slackSecretSet: !!slackSigningSecret };
+}
+ipcMain.handle('config:get', (): RedactedConfig => redactConfig(readConfig()));
+ipcMain.handle('config:update', (_evt, patch: unknown) => redactConfig(writeConfig(sanitizeConfigPatch(patch))));
 ipcMain.handle('config:ensureHome', (_evt, path: unknown) => {
   if (typeof path !== 'string' || path.length === 0) return { ok: false, error: 'invalid path' };
   return ensureHarnessHome(path);

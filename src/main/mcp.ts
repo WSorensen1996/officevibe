@@ -1,4 +1,4 @@
-import { safeStorage } from 'electron';
+import { encryptValue, decryptValue, encryptionAvailable } from './secrets';
 
 /**
  * User-configured MCP servers that get wired into the Claude Code agents the app
@@ -6,9 +6,9 @@ import { safeStorage } from 'electron';
  * mapped onto each agent's `mcp.json` (loaded via `--mcp-config`) at spawn time.
  *
  * Secret-bearing values (every value in `env` and `headers`) are encrypted at
- * rest with Electron safeStorage — see encryptDef/decryptDef. Everything else
- * (name, transport, url, command, args, scope) stays plaintext so the list can
- * be rendered without decrypting.
+ * rest with Electron safeStorage (see ./secrets) — see encryptDef/decryptDef.
+ * Everything else (name, transport, url, command, args, scope) stays plaintext
+ * so the list can be rendered without decrypting.
  */
 export interface McpServerDef {
   /** Stable id (slug + random suffix); the key we upsert/remove by. */
@@ -35,30 +35,6 @@ export type ClaudeMcpEntry =
   | { type: 'stdio'; command: string; args: string[]; env?: Record<string, string> }
   | { type: 'http' | 'sse'; url: string; headers?: Record<string, string> };
 
-/** Marks a value encrypted by safeStorage (base64 ciphertext follows). Lets us
- *  tell encrypted from legacy/fallback plaintext on read. */
-const ENC_PREFIX = 'enc:v1:';
-
-function encryptValue(plain: string): string {
-  if (!plain) return plain;
-  try {
-    if (safeStorage.isEncryptionAvailable()) {
-      return ENC_PREFIX + safeStorage.encryptString(plain).toString('base64');
-    }
-  } catch { /* fall through to plaintext */ }
-  return plain; // safeStorage unavailable (e.g. no keyring) → store plaintext
-}
-
-function decryptValue(stored: string): string {
-  if (!stored || !stored.startsWith(ENC_PREFIX)) return stored; // legacy/plaintext
-  try {
-    return safeStorage.decryptString(Buffer.from(stored.slice(ENC_PREFIX.length), 'base64'));
-  } catch {
-    // Keychain changed/unavailable — we can't recover; never leak ciphertext into mcp.json.
-    return '';
-  }
-}
-
 function mapValues(rec: Record<string, string> | undefined, fn: (v: string) => string): Record<string, string> | undefined {
   if (!rec) return undefined;
   const out: Record<string, string> = {};
@@ -76,11 +52,8 @@ export function decryptDef(def: McpServerDef): McpServerDef {
   return { ...def, env: mapValues(def.env, decryptValue), headers: mapValues(def.headers, decryptValue) };
 }
 
-/** True when safeStorage can actually encrypt on this machine. Surfaced to the
- *  UI so the user knows when secrets fall back to plaintext at rest. */
-export function encryptionAvailable(): boolean {
-  try { return safeStorage.isEncryptionAvailable(); } catch { return false; }
-}
+/** Re-exported from ./secrets so existing `./mcp` importers keep working. */
+export { encryptionAvailable };
 
 /** Validate an mcp.json server key. A bad key breaks the whole --mcp-config load,
  *  so we gate it at save time. */

@@ -1,7 +1,20 @@
 import { app } from 'electron';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { McpServerDef } from './mcp';
+import { encryptValue } from './secrets';
+
+/** Owner-only perms for config.json — it carries the (encrypted) Slack signing
+ *  secret and the full project list, so keep it unreadable by other local users. */
+const CONFIG_FILE_MODE = 0o600;
+
+/** Persist `cfg` to `p` as owner-only JSON. `mode` on writeFileSync only applies
+ *  when the file is created, so chmod after to also tighten a pre-existing file. */
+function writeConfigFile(p: string, cfg: HarnessConfig): void {
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(cfg, null, 2), { encoding: 'utf8', mode: CONFIG_FILE_MODE });
+  try { chmodSync(p, CONFIG_FILE_MODE); } catch { /* best-effort on platforms without POSIX modes */ }
+}
 
 /** A scheduled auto-dispatch handled by the scheduler. Historically a recurring
  *  "mission" (label/to/body fired every intervalMs); now also backs Tasks-tab
@@ -205,18 +218,19 @@ function migrateProjects(cfg: HarnessConfig): HarnessConfig {
 export function writeConfig(patch: Partial<HarnessConfig>): HarnessConfig {
   const current = readConfig();
   const next: HarnessConfig = { ...current, ...patch };
-  const p = configPath();
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(next, null, 2), 'utf8');
+  // Seal the Slack signing secret at rest (idempotent — readConfig hands it back
+  // already encrypted, so an unchanged value is not re-sealed). It stays sealed in
+  // the returned object; the config:get/config:update IPC handlers redact it
+  // entirely before it can reach the renderer.
+  next.slackSigningSecret = encryptValue(next.slackSigningSecret ?? '') || undefined;
+  writeConfigFile(configPath(), next);
   return next;
 }
 
 /** Wipe the persisted config back to first-run defaults so the app boots into
  *  onboarding again. Used by the "reset & start over" flow. */
 export function resetConfig(): HarnessConfig {
-  const p = configPath();
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(DEFAULTS, null, 2), 'utf8');
+  writeConfigFile(configPath(), DEFAULTS);
   return { ...DEFAULTS };
 }
 

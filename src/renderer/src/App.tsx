@@ -139,7 +139,8 @@ export function App() {
       // Read live: overlay/openTask state changes shouldn't require re-subscribing,
       // and a stale closure could let this fire over a just-opened modal/task form.
       const st = useStore.getState();
-      const overlay = st.addAgentOpen || !!st.quitWarn
+      // quitWarn is local component state (not in the store), so read it directly.
+      const overlay = st.addAgentOpen || !!quitWarn
         || !!st.fullscreenAgentId || !!st.fullscreenFilePath;
       // A task view (incl. the new-task form) is open → it owns ⌘/Ctrl+Enter (submit).
       if (overlay || st.openTaskId) return;
@@ -156,7 +157,7 @@ export function App() {
     // office canvas, etc.) can't swallow the combo before this window handler runs.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [config?.onboardingComplete]);
+  }, [config?.onboardingComplete, quitWarn]);
 
   if (!config) {
     return <div style={{ width: '100vw', height: '100vh', background: 'var(--cth-cream-100)' }} />;

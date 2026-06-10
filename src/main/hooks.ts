@@ -13,11 +13,12 @@
  */
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server, type Socket } from 'node:net';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, rmSync, chmodSync } from 'node:fs';
 import { Notification, type WebContents } from 'electron';
 import type { ProjectManager } from './project';
 import type { HarnessConfig } from './config';
 import type { KnowledgeManager } from './knowledge';
+import { isRiskyAction } from './riskyAction';
 
 // Tools safe to auto-approve without interrupting the human (read-only / non-
 // mutating). Everything else (Bash, Write, Edit, WebFetch, …) asks for approval.
@@ -27,41 +28,12 @@ const ALWAYS_ALLOW = new Set([
 
 // ─── Hybrid approval model (task t-mq70hfiq-lfoa) ──────────────────────────────
 // Goal: the user NEVER approves in an agent's terminal. Everything safe — edits,
-// reads, builds, and ALL MCP tools — auto-approves silently. Only genuinely RISKY
+// reads, builds, and ALL MCP tools — auto-approves silently. Genuinely RISKY
 // actions (destructive or outbound/irreversible) surface as the in-app approval
-// card, which is approvable from the UI or the phone (/remote-control). A risky
-// action is gated even under full-auto (autoMode).
-//
-// Risky Bash commands: deletes, history/remote rewrites, disk/permission changes,
-// privilege escalation, process/power control, pipe-to-shell, publish/deploy.
-const RISKY_BASH: RegExp[] = [
-  /\brm\b/, /\brmdir\b/, /\bunlink\b/, /\bshred\b/,
-  /\bgit\s+push\b/, /\bgit\s+reset\s+--hard\b/, /\bgit\s+clean\s+-[a-z]*f/, /\bgit\s+branch\s+-D\b/,
-  /\bdd\b\s+if=/, /\bmkfs\b/, /\bchmod\s+-R\b/, /\bchown\s+-R\b/,
-  /\bsudo\b/, /\bsu\s/,
-  /\bkill(all)?\b/, /\bpkill\b/, /\bshutdown\b/, /\breboot\b/, /\bhalt\b/,
-  /\|\s*(sh|bash|zsh)\b/, /\b(curl|wget)\b[^|]*\|/,
-  /\b(npm|yarn|pnpm)\s+publish\b/, /\bdocker\s+push\b/, /\bgh\s+release\b/, /\bnpm\s+run\s+deploy\b/
-];
-// Risky MCP tool name fragments: external sends / deletes / payments. The MCP tool
-// id is `mcp__<server>__<action>`, so a substring match on the lowercased id flags
-// e.g. gmail send, slack post, calendar/drive delete, a payment charge.
-const RISKY_MCP = ['send', 'delete', 'remove', 'trash', 'payment', 'charge', 'transfer', 'publish', 'post'];
-
-/** True when a tool call is destructive/outbound and should surface the approval
- *  card even under autoMode. Read/search/edit tools and read-only MCP are safe. */
-function isRiskyAction(tool: string, input: unknown): boolean {
-  if (tool === 'Bash') {
-    const cmd = (input && typeof input === 'object' && 'command' in input)
-      ? String((input as { command?: unknown }).command ?? '') : '';
-    return RISKY_BASH.some((re) => re.test(cmd));
-  }
-  if (tool.startsWith('mcp__')) {
-    const t = tool.toLowerCase();
-    return RISKY_MCP.some((v) => t.includes(v));
-  }
-  return false;
-}
+// card, approvable from the UI or the phone (/remote-control). The risk heuristic
+// lives in ./riskyAction (pure + unit-tested); it is a BEST-EFFORT foot-gun reducer,
+// NOT a sandbox — an agent with full shell can defeat it, so the real safeguard
+// remains running OfficeVibe only on projects/tools you trust.
 // How long a pending permission request waits for the human before we fall through
 // to Claude's native terminal prompt. MUST stay below both the PreToolUse hook
 // `timeout` in settings.json and the shim's self-kill (see project.ts), so this
@@ -139,7 +111,11 @@ export class HookServer {
       conn.on('error', () => { /* shim hung up — ignore */ });
     });
     this.server.on('error', (e) => console.error('[project] hook server error:', e));
-    this.server.listen(sock);
+    // Restrict the approval socket to the owner once it's bound: anyone who can
+    // connect can submit PreToolUse payloads, so don't leave it world-accessible.
+    this.server.listen(sock, () => {
+      try { chmodSync(sock, 0o600); } catch { /* best-effort on non-POSIX */ }
+    });
   }
 
   stop(): void {

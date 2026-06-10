@@ -1,15 +1,47 @@
 import { mkdir, readdir, readFile, writeFile, stat } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, relative, resolve } from 'node:path';
+
+/** Lexical containment check: is `absPath` at or below `absRoot`? */
+function isInside(absRoot: string, absPath: string): boolean {
+  const rel = relative(absRoot, absPath);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/** realpath the deepest part of `p` that exists (the file itself may not yet exist
+ *  on a write), so symlinks anywhere along the path are resolved before we judge
+ *  containment. Returns `p` unchanged if nothing resolves. */
+function realpathDeepest(p: string): string {
+  let cur = p;
+  // Walk up until we hit an existing ancestor, realpath it, then re-attach the tail.
+  const tail: string[] = [];
+  while (cur && !existsSync(cur)) {
+    const parent = dirname(cur);
+    if (parent === cur) return p; // reached the root without finding anything
+    tail.unshift(cur.slice(parent.length + 1));
+    cur = parent;
+  }
+  try { return tail.length ? join(realpathSync(cur), ...tail) : realpathSync(cur); }
+  catch { return p; }
+}
 
 /**
  * Confines `path` inside `root` to prevent path-traversal escapes.
  * Returns the resolved absolute path on success, or null on violation.
+ *
+ * Two layers: a lexical check (cheap, catches `../` traversal) AND a realpath
+ * check (resolves symlinks, so a symlink planted inside `root` that points
+ * outside it cannot be used to read/write past the boundary).
  */
 function safeJoin(root: string, rel: string): string | null {
   const absRoot = resolve(root);
   const absPath = isAbsolute(rel) ? normalize(rel) : resolve(absRoot, rel);
-  const rel2 = relative(absRoot, absPath);
-  if (rel2.startsWith('..') || isAbsolute(rel2)) return null;
+  if (!isInside(absRoot, absPath)) return null;
+  // Symlink-escape guard: the real (symlink-resolved) target must still be inside
+  // the real root. realpath the root once so a symlinked root is compared fairly.
+  let realRoot: string;
+  try { realRoot = realpathSync(absRoot); } catch { realRoot = absRoot; }
+  if (!isInside(realRoot, realpathDeepest(absPath))) return null;
   return absPath;
 }
 

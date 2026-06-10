@@ -78,7 +78,9 @@ const SHORTCUT_GROUPS: { group: string; items: { keys: string[]; label: string }
  *  declare them, so read them off a widened view. */
 type SlackConfig = HarnessConfig & {
   slackEnabled?: boolean;
-  slackSigningSecret?: string;
+  /** The signing secret itself is never sent to the renderer; we only learn
+   *  whether one is stored, so the field can show "saved" without revealing it. */
+  slackSecretSet?: boolean;
   slackChannelId?: string;
   slackPort?: number;
 };
@@ -189,15 +191,24 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
   // ─── Slack integration ─────────────────────────────────────────────────────
   const slackCfg = config as SlackConfig;
   const [slackEnabled, setSlackEnabled] = useState(slackCfg.slackEnabled ?? false);
-  const [slackSecret, setSlackSecret] = useState(slackCfg.slackSigningSecret ?? '');
+  // The secret never round-trips to the renderer (see SlackConfig). The field
+  // starts blank; `secretDirty` tracks whether the user typed a new one so we
+  // only overwrite the stored secret when they actually changed it.
+  const secretAlreadySet = slackCfg.slackSecretSet ?? false;
+  const [slackSecret, setSlackSecret] = useState('');
+  const [secretDirty, setSecretDirty] = useState(false);
   const [slackChannel, setSlackChannel] = useState(slackCfg.slackChannelId ?? '');
   const [slackPort, setSlackPort] = useState(String(slackCfg.slackPort ?? 3847));
   const [tunnelUrl, setTunnelUrl] = useState('');
   const [slackBusy, setSlackBusy] = useState(false);
   const [slackNote, setSlackNote] = useState('');
+  // Start needs a secret to exist — either one already stored, or one just typed.
+  const hasSecret = secretAlreadySet || !!slackSecret.trim();
 
   const slackPatch = (enabled: boolean) => ({
-    signingSecret: slackSecret,
+    // Omit when untouched so the main process keeps the stored secret; a dirtied
+    // empty field (signingSecret: '') is the explicit "clear it" signal.
+    signingSecret: secretDirty ? slackSecret : undefined,
     channelId: slackChannel,
     port: Number(slackPort) || 3847,
     enabled
@@ -446,8 +457,10 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
               <input
                 type="password"
                 value={slackSecret}
-                onChange={(e) => setSlackSecret(e.target.value)}
-                placeholder="Slack app → Basic Information → Signing Secret"
+                onChange={(e) => { setSlackSecret(e.target.value); setSecretDirty(true); }}
+                placeholder={secretAlreadySet
+                  ? '•••••••••• saved — leave blank to keep'
+                  : 'Slack app → Basic Information → Signing Secret'}
                 style={{ ...inputStyle, fontFamily: 'var(--cth-font-mono)' }}
               />
             </label>
@@ -475,7 +488,7 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
             </div>
 
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <PixelButton variant="primary" size="sm" onClick={startSlack} disabled={slackBusy || !slackSecret.trim()}>
+              <PixelButton variant="primary" size="sm" onClick={startSlack} disabled={slackBusy || !hasSecret}>
                 {slackBusy ? '…' : 'start'}
               </PixelButton>
               <PixelButton variant="secondary" size="sm" onClick={stopSlack} disabled={slackBusy}>

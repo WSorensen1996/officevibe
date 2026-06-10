@@ -11,6 +11,8 @@ export interface PixelButtonProps {
   disabled?: boolean;
   fullWidth?: boolean;
   style?: CSSProperties;
+  /** Native tooltip / accessible label shown on hover. */
+  title?: string;
 }
 
 const heightBySize: Record<Size, number> = { sm: 24, md: 32, lg: 40 };
@@ -23,7 +25,8 @@ export function PixelButton({
   onClick,
   disabled = false,
   fullWidth = false,
-  style
+  style,
+  title
 }: PixelButtonProps) {
   const [pressed, setPressed] = useState(false);
   const [hover, setHover] = useState(false);
@@ -63,6 +66,7 @@ export function PixelButton({
 
   return (
     <button
+      title={title}
       onClick={disabled ? undefined : onClick}
       onMouseDown={() => setPressed(true)}
       onMouseUp={() => setPressed(false)}
