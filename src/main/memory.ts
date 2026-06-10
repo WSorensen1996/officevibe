@@ -15,7 +15,7 @@
  */
 import { existsSync, statSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 
 export type EmbeddingModel = 'minilm' | 'embeddinggemma';
 
@@ -42,6 +42,9 @@ export class MemoryManager {
   private initStarted = false;
   /** agentId → memory.md mtimeMs at last successful mine (skip unchanged). */
   private lastMined = new Map<string, number>();
+  /** In-flight `mempalace mine` children, so stop() can kill them on a project
+   *  switch / quit instead of leaving them writing the palace (they have no timeout). */
+  private mining = new Set<ChildProcess>();
 
   constructor(
     private getHome: () => string | null,
@@ -125,6 +128,9 @@ export class MemoryManager {
 
   stop(): void {
     if (this.mineTimer) { clearInterval(this.mineTimer); this.mineTimer = null; }
+    // Kill any in-flight miners so they don't outlive the project they were mining.
+    for (const proc of this.mining) { try { proc.kill('SIGKILL'); } catch { /* already gone */ } }
+    this.mining.clear();
   }
 
   private startMineLoop(): void {
@@ -164,15 +170,17 @@ export class MemoryManager {
     const proc = spawn(bin, ['mine', agentDir, '--wing', id, '--agent', id], {
       env: this.childEnv(), stdio: ['ignore', 'ignore', 'pipe']
     });
+    this.mining.add(proc);
     let err = '';
     proc.stderr?.on('data', (d) => { err += d.toString(); });
     proc.on('close', (code) => {
+      this.mining.delete(proc);
       if (code !== 0) {
         console.error(`[memory] mine ${id} exited ${code}: ${err.slice(-300)}`);
         this.lastMined.delete(id); // let the next tick retry
       }
     });
-    proc.on('error', () => { this.lastMined.delete(id); });
+    proc.on('error', () => { this.mining.delete(proc); this.lastMined.delete(id); });
   }
 
   // — recall (read) —

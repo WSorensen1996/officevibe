@@ -14,7 +14,7 @@
  * Mirrors the headless `claude -p` pattern in assistant.ts (Dwight) and the interval/
  * silent-degrade pattern in memory.ts. Best-effort throughout.
  */
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { resolveCommand, userShellPath } from './shellEnv';
 import type { HarnessConfig } from './config';
 import type { KnowledgeManager, CuratorPlan, SkillIndexEntry } from './knowledge';
@@ -30,6 +30,10 @@ const MIN_SKILLS_TO_CONSOLIDATE = 6;          // below this, there's nothing wor
 export class Curator {
   private intervalTimer: NodeJS.Timeout | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
+  private bootTimer: NodeJS.Timeout | null = null;
+  /** The in-flight consolidation `claude -p` child, so stop() can kill it on a
+   *  project switch / quit instead of leaving it running against the old project. */
+  private activeChild: ChildProcess | null = null;
   private running = false;
   private lastConsolidateAt = 0;
 
@@ -54,13 +58,17 @@ export class Curator {
     this.intervalTimer = setInterval(() => { void this.runCycle('interval'); }, mins * 60_000);
     this.intervalTimer.unref();
     // A gentle first pass ~30s after boot: promote anything pending, age stale skills.
-    const boot = setTimeout(() => { void this.runCycle('boot'); }, 30_000);
-    boot.unref();
+    this.bootTimer = setTimeout(() => { this.bootTimer = null; void this.runCycle('boot'); }, 30_000);
+    this.bootTimer.unref();
   }
 
   stop(): void {
     if (this.intervalTimer) { clearInterval(this.intervalTimer); this.intervalTimer = null; }
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+    if (this.bootTimer) { clearTimeout(this.bootTimer); this.bootTimer = null; }
+    // Kill an in-flight consolidation so it can't keep working the old project's
+    // knowledge dir after a switch/quit. finish() (in runConsolidationLLM) clears the ref.
+    if (this.activeChild) { try { this.activeChild.kill('SIGKILL'); } catch { /* already gone */ } }
   }
 
   /** Debounced trigger from the Stop hook — a burst of idles collapses into one cycle. */
@@ -161,9 +169,16 @@ export class Curator {
         return;
       }
 
+      this.activeChild = child;
       let stdout = '';
       let settled = false;
-      const finish = (v: CuratorPlan | null): void => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); };
+      const finish = (v: CuratorPlan | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.activeChild = null;
+        resolve(v);
+      };
       const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* noop */ } finish(null); }, CONSOLIDATE_TIMEOUT_MS);
       child.stdout?.on('data', (d) => { stdout += d.toString(); });
       child.on('error', () => finish(null));

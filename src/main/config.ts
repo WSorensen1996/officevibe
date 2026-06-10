@@ -1,19 +1,19 @@
 import { app } from 'electron';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { McpServerDef } from './mcp';
 import { encryptValue } from './secrets';
+import { atomicWriteJson } from './atomicJson';
 
 /** Owner-only perms for config.json — it carries the (encrypted) Slack signing
  *  secret and the full project list, so keep it unreadable by other local users. */
 const CONFIG_FILE_MODE = 0o600;
 
-/** Persist `cfg` to `p` as owner-only JSON. `mode` on writeFileSync only applies
- *  when the file is created, so chmod after to also tighten a pre-existing file. */
+/** Persist `cfg` to `p` as owner-only JSON, atomically (temp + rename) so a crash
+ *  mid-write can't truncate the config and lose the MCP servers / Slack settings. */
 function writeConfigFile(p: string, cfg: HarnessConfig): void {
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(cfg, null, 2), { encoding: 'utf8', mode: CONFIG_FILE_MODE });
-  try { chmodSync(p, CONFIG_FILE_MODE); } catch { /* best-effort on platforms without POSIX modes */ }
+  atomicWriteJson(p, cfg, { mode: CONFIG_FILE_MODE });
 }
 
 /** A scheduled auto-dispatch handled by the scheduler. Historically a recurring

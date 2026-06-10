@@ -26,6 +26,19 @@ import { decryptValue } from './secrets';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 
+// Last-resort safety net: a stray rejection or throw on a callback stack (a timer,
+// a child-process or server event, a fire-and-forget promise) would otherwise tear
+// down the whole main process and take every running agent with it. Log loudly and
+// keep the app alive — a backgrounded curator/memory/Slack hiccup must not be fatal.
+// (uncaughtException leaves state possibly inconsistent, but for a local desktop
+// harness staying up beats a hard crash dialog; the atomic writes guard the data.)
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandledRejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[process] uncaughtException:', err);
+});
+
 // Dev-runtime isolation: when running unpackaged (npm run dev), redirect userData
 // to ~/.config/officevibe-dev so iterating on source can never corrupt the stable
 // packaged AppImage's config at ~/.config/officevibe. Must run before app is ready.
@@ -1240,8 +1253,13 @@ ipcMain.handle('project:textSearch', (_evt, query: unknown) => {
   }
   for (const { path, source } of targets) {
     if (!existsSync(path)) continue;
+    // Guard each read: a file vanishing/permission-flipping between the existsSync
+    // and the read (or an unreadable file) must skip that target, not reject the
+    // whole search.
+    let content: string;
+    try { content = readFileSync(path, 'utf8'); } catch { continue; }
     let hits = 0;
-    for (const line of readFileSync(path, 'utf8').split('\n')) {
+    for (const line of content.split('\n')) {
       if (hits >= 3) break;
       const idx = line.toLowerCase().indexOf(q);
       if (idx === -1) continue;
@@ -1536,7 +1554,7 @@ app.whenReady().then(() => {
     void startSlackServer().then((r) => {
       if (!r.ok) console.error('[slack] auto-start failed:', r.error);
       else console.log('[slack] webhook listening', r.url ? `(tunnel: ${r.url})` : '(no tunnel)');
-    });
+    }).catch((e) => console.error('[slack] auto-start threw:', e));
   }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

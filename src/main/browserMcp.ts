@@ -347,6 +347,11 @@ export async function startBrowserMcp(deps: BrowserMcpDeps, opts: StartBrowserMc
       throw e;
     }
   }
+  // The bind-phase 'error' listener was removed on 'listening'. Without a standing
+  // one, any later server 'error' (a post-bind socket fault) would be an unhandled
+  // EventEmitter 'error' and crash the whole main process. Log it instead.
+  httpServer.on('error', (e) => console.error('[browser-mcp] server error:', e));
+
   const addr = httpServer.address();
   const port = typeof addr === 'object' && addr ? addr.port : 0;
 

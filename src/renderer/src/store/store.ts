@@ -513,7 +513,9 @@ export const useStore = create<State>((set) => ({
   updateAgent: (id, patch) =>
     set((s) => ({ agents: s.agents.map(a => a.id === id ? { ...a, ...patch } : a) })),
   pushFeed: (id, line) =>
-    set((s) => ({ feeds: { ...s.feeds, [id]: [...(s.feeds[id] ?? []), line] } })),
+    // Cap each agent's feed so a long-lived agent can't grow it without bound
+    // (it's appended on every parsed tool line and only cleared on agent removal).
+    set((s) => ({ feeds: { ...s.feeds, [id]: [...(s.feeds[id] ?? []), line].slice(-500) } })),
   addAgent: (agent) =>
     set((s) => {
       const agents = [...s.agents, agent];

@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
+import { AppErrorBoundary } from './components/AppErrorBoundary';
 import { sttLog } from '@/lib/dictation/log';
 import brandLogo from '@brand/logo.png?url';
 import './design/global.css';
@@ -68,6 +69,8 @@ if (!root) throw new Error('No root element');
 
 createRoot(root).render(
   <StrictMode>
-    <App />
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
   </StrictMode>
 );

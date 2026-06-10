@@ -21,7 +21,12 @@ import {
   readdirSync, rmSync, appendFileSync, statSync
 } from 'node:fs';
 import { join } from 'node:path';
+import { atomicWriteJson as writeJsonAtomic, rotateIfLarge } from './atomicJson';
 import { deriveProjectName, readConfig } from './config';
+
+/** Cap for the append-only event/say logs. Past this the live file is rotated to
+ *  `.1` so tail-readers (logTail/saysTail load the whole file) stay fast. */
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
 import { mcpServersForAgent } from './mcp';
 import { randomBytes } from 'node:crypto';
 
@@ -180,7 +185,7 @@ function stamp(): string {
 }
 
 function shortRand(): string {
-  return randomBytes(3).toString('hex');
+  return randomBytes(6).toString('hex'); // 2^48 — collision-safe for same-ms id bursts
 }
 
 // ─── ProjectManager ────────────────────────────────────────────────────────────
@@ -619,8 +624,10 @@ export class ProjectManager {
         this.writeJson(cursorPath, { ...cursor, lastSpokenUuid: lastUuid });
       }
       if (out.length === 0) return { says: [], skillsUsed };
+      const saysPath = join(dir, 'says.jsonl');
+      rotateIfLarge(saysPath, LOG_MAX_BYTES); // bound the per-agent say log
       appendFileSync(
-        join(dir, 'says.jsonl'),
+        saysPath,
         out.map((s) => JSON.stringify(s)).join('\n') + '\n',
         'utf8'
       );
@@ -1111,20 +1118,23 @@ export class ProjectManager {
     const root = this.root();
     if (!root) return;
     const line = JSON.stringify({ ts: Date.now(), ...event }) + '\n';
-    try { appendFileSync(join(root, 'log.jsonl'), line, 'utf8'); } catch { /* noop */ }
+    const path = join(root, 'log.jsonl');
+    rotateIfLarge(path, LOG_MAX_BYTES); // keep the live log small for logTail
+    try { appendFileSync(path, line, 'utf8'); } catch { /* noop */ }
   }
 
   // — json + atomic io —
   private readJson<T>(p: string, fallback: T): T {
     try { return JSON.parse(readFileSync(p, 'utf8')) as T; } catch { return fallback; }
   }
+  // All persisted-state writes go through the crash-safe atomic writer (temp +
+  // rename), so a force-quit / kill -9 mid-write can never truncate tasks.json,
+  // registry.json, or a cursor and make readJson() silently reset it to empty.
   private writeJson(p: string, data: unknown): void {
-    writeFileSync(p, JSON.stringify(data, null, 2), 'utf8');
+    writeJsonAtomic(p, data);
   }
   private atomicWriteJson(p: string, data: unknown): void {
-    const tmp = `${p}.tmp-${shortRand()}`;
-    writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-    renameSync(tmp, p);
+    writeJsonAtomic(p, data);
   }
 }
 

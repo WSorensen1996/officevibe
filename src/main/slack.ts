@@ -104,6 +104,9 @@ export class SlackWebhookServer {
       // (openTunnel below), so the raw port must never be LAN-reachable.
       server.listen(this.port, '127.0.0.1', () => {
         server.off('error', onError);
+        // Swap the bind-phase rejecter for a standing handler: a post-bind socket
+        // 'error' with no listener would crash the main process. Log + tear down.
+        server.on('error', (e) => { console.error('[slack] server error:', e); this.stop(); });
         this.server = server;
         resolve();
       });
