@@ -23,6 +23,7 @@ import { SlackWebhookServer } from './slack';
 import { startBrowserMcp, type BrowserMcpHandle } from './browserMcp';
 import { decryptDef, encryptDef, encryptionAvailable, isValidName, testConnection, type McpServerDef } from './mcp';
 import { decryptValue } from './secrets';
+import { MeetingManager, type MeetingSources, type TranscriptSegment } from './meeting';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 
@@ -165,6 +166,12 @@ const hookServer = new HookServer(
   () => readConfig(),
   knowledge,
   (agentId) => curator.onAgentIdle(agentId)
+);
+// Meeting recordings + live transcripts (and, later, the analysis driver) live
+// under <activeProject>/meetings; same lazy-root + emit shape as the hive.
+const meetings = new MeetingManager(
+  () => readConfig().activeProjectPath,
+  (channel, payload) => { try { liveWebContents()?.send(channel, payload); } catch { /* window tore down */ } }
 );
 let mainWindow: BrowserWindow | null = null;
 
@@ -1080,6 +1087,49 @@ ipcMain.handle('meeting:setDisplaySource', (_evt, id: unknown) => {
   return { ok: true };
 });
 
+// ─── IPC: meetings (recording + transcript persistence) ──────────────────────
+ipcMain.handle('meeting:start', (_evt, opts: unknown) => {
+  const o = (opts ?? {}) as { title?: unknown; sources?: unknown; language?: unknown; model?: unknown };
+  return meetings.start({
+    title: typeof o.title === 'string' ? o.title : undefined,
+    sources: (o.sources ?? {}) as MeetingSources,
+    language: typeof o.language === 'string' ? o.language : 'auto',
+    model: typeof o.model === 'string' ? o.model : 'whisper-base'
+  });
+});
+/** Hot path (~every 2s): one MediaRecorder chunk. Electron structured-clones the
+ *  renderer's ArrayBuffer into a Node Buffer/Uint8Array here. */
+ipcMain.handle('meeting:appendChunk', (_evt, id: unknown, chunk: unknown) => {
+  if (typeof id !== 'string') return { ok: false, error: 'invalid args' };
+  const data = toBytes(chunk);
+  if (!data) return { ok: false, error: 'invalid chunk' };
+  return meetings.appendChunk(id, data);
+});
+ipcMain.handle('meeting:writeFrame', (_evt, id: unknown, elapsedMs: unknown, chunk: unknown) => {
+  if (typeof id !== 'string') return { ok: false, error: 'invalid args' };
+  const data = toBytes(chunk);
+  if (!data) return { ok: false, error: 'invalid frame' };
+  return meetings.writeFrame(id, typeof elapsedMs === 'number' ? elapsedMs : 0, data);
+});
+ipcMain.handle('meeting:appendTranscript', (_evt, id: unknown, segments: unknown) => {
+  if (typeof id !== 'string' || !Array.isArray(segments)) return { ok: false, error: 'invalid args' };
+  return meetings.appendTranscript(id, segments as TranscriptSegment[]);
+});
+ipcMain.handle('meeting:stop', (_evt, id: unknown, durationSec: unknown) => {
+  if (typeof id !== 'string') return { ok: false, error: 'invalid args' };
+  return meetings.stop(id, typeof durationSec === 'number' ? durationSec : undefined);
+});
+ipcMain.handle('meeting:list', () => meetings.list());
+ipcMain.handle('meeting:read', (_evt, id: unknown) =>
+  (typeof id === 'string' ? meetings.read(id) : { ok: false, error: 'invalid args' }));
+/** IPC payloads arrive as Buffer/Uint8Array/ArrayBuffer depending on sender shape;
+ *  normalize to a Uint8Array view without copying. */
+function toBytes(x: unknown): Uint8Array | null {
+  if (x instanceof Uint8Array) return x;
+  if (x instanceof ArrayBuffer) return new Uint8Array(x);
+  return null;
+}
+
 // ─── IPC: project store (multi-agent coordination) ──────────────────────────
 ipcMain.handle('project:board', () => hive.board());
 ipcMain.handle('project:tasks', () => hive.tasks());
@@ -1114,6 +1164,9 @@ function bootstrapActiveProject(): void {
   memory.start(); // init per-project palace + mine loop (no-op without mempalace)
   knowledge.ensureScaffold(); // seed the skill library dirs (no-op when disabled)
   curator.start(); // background promote/lifecycle/consolidate loop (no-op when disabled)
+  // A meeting that was mid-recording at the last crash/quit is honestly marked.
+  const repaired = meetings.scanForOrphans();
+  if (repaired) console.log(`[meeting] marked ${repaired} orphaned recording(s) as interrupted`);
 }
 
 /** Switch the active project IN-PROCESS: rewrite config, tear down the old project's

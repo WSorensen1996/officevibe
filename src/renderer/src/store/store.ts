@@ -101,12 +101,13 @@ export interface QueuedMessage {
 }
 
 /** Which view fills the left column. `office` is the floor + memory overlay and
- *  `browser` is the shared native browser pane; the next two are the selected
+ *  `browser` is the shared native browser pane; `meeting` is the shared meeting
+ *  view (record/transcribe/analyze); the next two are the selected
  *  agent's workspace (its terminal and messages); `task` is the
  *  transient full-card view opened from the Kanban board (see `openTaskId`);
  *  `file` is the transient file viewer opened from the files tab (see
  *  `openFilePath`). */
-export type LeftTab = 'office' | 'terminal' | 'browser' | 'messages' | 'task' | 'file';
+export type LeftTab = 'office' | 'terminal' | 'browser' | 'messages' | 'meeting' | 'task' | 'file';
 
 /** Sentinel `openTaskId` value meaning "the left task panel is in CREATE mode"
  *  (no real task yet). `shortId()` only ever emits `t-…` ids, so this can never

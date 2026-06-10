@@ -6,7 +6,8 @@ const TABS: { key: LeftTab; label: string; icon: IconName }[] = [
   { key: 'office',   label: 'office',   icon: 'mcp' },
   { key: 'messages', label: 'messages', icon: 'bell' },
   { key: 'terminal', label: 'terminal', icon: 'terminal' },
-  { key: 'browser',  label: 'browser',  icon: 'web' }
+  { key: 'browser',  label: 'browser',  icon: 'web' },
+  { key: 'meeting',  label: 'meeting',  icon: 'mic' }
 ];
 
 export interface LeftTabsProps {
@@ -14,6 +15,8 @@ export interface LeftTabsProps {
   onChange: (tab: LeftTab) => void;
   /** Pulse a badge on the Browser tab while the agent is actively browsing. */
   browserActive: boolean;
+  /** Pulse a REC badge on the Meeting tab while a meeting is recording. */
+  meetingRecording?: boolean;
   /** Pulse a badge on the Messages tab while the selected agent is blocked waiting
    *  for your input (a permission prompt / question surfaced in its messages tab). */
   messagesNeedsYou?: boolean;
@@ -36,7 +39,7 @@ export interface LeftTabsProps {
  * working, interleaved with its mail — is one click away. A pulsing dot appears on
  * the Browser tab while Michael is browsing and you're looking at another tab.
  */
-export function LeftTabs({ current, onChange, browserActive, messagesNeedsYou, accent, hasOpenTask, hasOpenFile }: LeftTabsProps) {
+export function LeftTabs({ current, onChange, browserActive, meetingRecording, messagesNeedsYou, accent, hasOpenTask, hasOpenFile }: LeftTabsProps) {
   // The TASK and FILE tabs are transient — only present while a card / file is
   // open, appended last (task before file).
   const tabs = [
@@ -55,13 +58,16 @@ export function LeftTabs({ current, onChange, browserActive, messagesNeedsYou, a
       {tabs.map(t => {
         const active = current === t.key;
         // Per-tab pulsing badge: Browser while Michael browses, Messages while the
-        // selected agent is blocked waiting on you. Hidden on the active tab.
-        const badge = active ? null
-          : t.key === 'browser' && browserActive
-            ? { color: 'var(--cth-sky)', title: 'Michael is browsing — flick over to watch' }
-            : t.key === 'messages' && messagesNeedsYou
-              ? { color: 'var(--cth-status-blocked)', title: 'An agent needs your input — open messages to answer' }
-              : null;
+        // selected agent is blocked waiting on you, Meeting while recording (the
+        // REC dot shows on the active tab too — a live recording must stay visible).
+        const badge = t.key === 'meeting' && meetingRecording
+          ? { color: 'var(--cth-status-blocked)', title: 'Recording — the meeting is being captured' }
+          : active ? null
+            : t.key === 'browser' && browserActive
+              ? { color: 'var(--cth-sky)', title: 'Michael is browsing — flick over to watch' }
+              : t.key === 'messages' && messagesNeedsYou
+                ? { color: 'var(--cth-status-blocked)', title: 'An agent needs your input — open messages to answer' }
+                : null;
         // Agent tabs adopt the selected agent's accent; shared views stay sky.
         const underline = isAgentTab(t.key) && accent ? `var(--cth-${accent})` : 'var(--cth-sky)';
         return (

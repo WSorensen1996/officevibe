@@ -25,6 +25,8 @@ import { FullscreenTerminal } from '@/components/FullscreenTerminal';
 import { FullscreenFileEditor } from '@/components/FullscreenFileEditor';
 import { LeftFileEditor } from '@/components/LeftFileEditor';
 import { TaskDetailPanel } from '@/components/TaskDetailPanel';
+import { MeetingPanel } from '@/components/meeting/MeetingPanel';
+import { useMeetingRecording } from '@/hooks/useMeeting';
 
 /** The window is frameless on macOS (titleBarStyle: hiddenInset) and the in-app
  *  title bar is gone, so the traffic lights would float over the content with no
@@ -53,6 +55,8 @@ export function App() {
   const openTaskId = useStore(s => s.openTaskId);
   const openFilePath = useStore(s => s.openFilePath);
   const browserActive = useStore(s => s.browserActive);
+  // REC badge on the meeting tab — capture itself is module-scoped, this is display.
+  const meetingRecording = useMeetingRecording();
   // Any agent blocked on a prompt lights the Messages-tab badge (the request lives
   // in that agent's messages). Clicking the tab jumps to the blocked agent so it's
   // answerable even when a different agent is selected — covers "any agent blocks".
@@ -262,6 +266,7 @@ export function App() {
               setLeftTab(tab);
             }}
             browserActive={browserActive}
+            meetingRecording={meetingRecording}
             messagesNeedsYou={!!blockedAgent}
             accent={agent?.accent}
             hasOpenTask={!!openTaskId}
@@ -301,6 +306,13 @@ export function App() {
                 is driven by App's browserShown effect (active tab + no overlay). */}
             <div style={{ position: 'absolute', inset: 0, display: leftTab === 'browser' ? 'block' : 'none' }}>
               <BrowserPane />
+            </div>
+
+            {/* Meeting tab — kept mounted (display toggle) so the live transcript/
+                insight feeds keep accumulating while you work in another tab. The
+                capture engine itself is module-scoped and never depends on this. */}
+            <div style={{ position: 'absolute', inset: 0, display: leftTab === 'meeting' ? 'block' : 'none' }}>
+              <MeetingPanel />
             </div>
 
             {/* Agent workspace — the selected agent's terminal/files/messages/logs.

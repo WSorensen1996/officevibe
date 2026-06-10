@@ -231,6 +231,61 @@ export interface ScreenSource {
   thumbnail: string;
 }
 
+/** Which capture sources a meeting records (mirrors main/meeting.ts). */
+export interface MeetingSources {
+  mic: boolean;
+  systemAudio: boolean;
+  systemAudioDeviceLabel?: string;
+  screen: boolean;
+}
+
+/** A meeting's identity + lifecycle (mirrors main/meeting.ts MeetingMeta). */
+export interface MeetingMeta {
+  id: string;
+  title: string;
+  startedAt: string;
+  endedAt?: string;
+  durationSec?: number;
+  status: 'recording' | 'ended' | 'interrupted';
+  sources: MeetingSources;
+  language: string;
+  model: string;
+  hasSummary?: boolean;
+  hasRecording?: boolean;
+  recordingBytes?: number;
+  segmentCount?: number;
+}
+
+/** One transcribed speech segment (seconds since meeting start; source = crude
+ *  speaker attribution: mic = "me", system = "them"). */
+export interface TranscriptSegment {
+  t0: number;
+  t1: number;
+  source: 'mic' | 'system';
+  text: string;
+}
+
+/** One analyst insight row (mirrors main/meeting.ts MeetingInsight). */
+export interface MeetingInsight {
+  ts: string;
+  by: string;
+  meetingId: string;
+  kind: 'recommendation' | 'proposal' | 'action-item' | 'note' | 'question';
+  text: string;
+  quote?: string;
+  suggestedTask?: { title: string; description?: string };
+}
+
+export interface MeetingReadResult {
+  ok: boolean;
+  error?: string;
+  meta?: MeetingMeta;
+  transcript?: TranscriptSegment[];
+  insights?: MeetingInsight[];
+  summaryMd?: string | null;
+  recordingPath?: string | null;
+}
+
 export interface MemoryStatus {
   available: boolean;
   enabled: boolean;
@@ -579,7 +634,52 @@ const api = {
       ipcRenderer.invoke('meeting:listScreenSources'),
     /** Arm the picked source id; the next getDisplayMedia resolves to it (one-shot). */
     setDisplaySource: (id: string | null): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke('meeting:setDisplaySource', id)
+      ipcRenderer.invoke('meeting:setDisplaySource', id),
+    /** Create the meeting folder + metadata; at most one meeting records at a time. */
+    start: (opts: { title?: string; sources: MeetingSources; language: string; model: string }):
+      Promise<{ ok: true; meta: MeetingMeta } | { ok: false; error: string }> =>
+      ipcRenderer.invoke('meeting:start', opts),
+    /** Append one MediaRecorder chunk to recording.webm (hot path, every ~2s). */
+    appendChunk: (id: string, chunk: ArrayBuffer): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('meeting:appendChunk', id, new Uint8Array(chunk)),
+    /** Persist one downscaled screen frame (JPEG) named by its meeting offset. */
+    writeFrame: (id: string, elapsedMs: number, chunk: ArrayBuffer):
+      Promise<{ ok: true; path: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke('meeting:writeFrame', id, elapsedMs, new Uint8Array(chunk)),
+    /** Append finalized transcript segments (the renderer transcribes locally). */
+    appendTranscript: (id: string, segments: TranscriptSegment[]): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('meeting:appendTranscript', id, segments),
+    /** Finalize the meeting (status, endedAt, duration). */
+    stop: (id: string, durationSec?: number): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('meeting:stop', id, durationSec),
+    list: (): Promise<MeetingMeta[]> => ipcRenderer.invoke('meeting:list'),
+    read: (id: string): Promise<MeetingReadResult> => ipcRenderer.invoke('meeting:read', id),
+    /** New transcript segments just persisted — drives the live transcript feed. */
+    onTranscript: (cb: (e: { meetingId: string; segments: TranscriptSegment[] }) => void): (() => void) => {
+      const listener = (_e: IpcRendererEvent, payload: { meetingId: string; segments: TranscriptSegment[] }) => cb(payload);
+      ipcRenderer.on('meeting:transcript', listener);
+      return () => ipcRenderer.removeListener('meeting:transcript', listener);
+    },
+    /** Meeting lifecycle changed (started/ended/interrupted). */
+    onState: (cb: (meta: MeetingMeta) => void): (() => void) => {
+      const listener = (_e: IpcRendererEvent, meta: MeetingMeta) => cb(meta);
+      ipcRenderer.on('meeting:state', listener);
+      return () => ipcRenderer.removeListener('meeting:state', listener);
+    },
+    /** The analyst posted an insight (Phase 4) — drives the live insights feed. */
+    onInsight: (cb: (insight: MeetingInsight) => void): (() => void) => {
+      const listener = (_e: IpcRendererEvent, insight: MeetingInsight) => cb(insight);
+      ipcRenderer.on('meeting:insight', listener);
+      return () => ipcRenderer.removeListener('meeting:insight', listener);
+    }
+  },
+
+  // ─── Platform facts the meeting UI branches on (no IPC round-trip needed) ────
+  platform: {
+    os: process.platform as 'linux' | 'darwin' | 'win32',
+    /** Wayland sessions get the OS portal picker; X11 gets our thumbnail modal. */
+    wayland: process.platform === 'linux'
+      && (process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY)
   },
 
   // ─── Embedded browser pane (god-driven native WebContentsView, bottom-left) ──

@@ -1,0 +1,151 @@
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { MeetingManager, type MeetingMeta, type TranscriptSegment } from '../src/main/meeting';
+
+const base = realpathSync(mkdtempSync(join(tmpdir(), 'officevibe-meeting-')));
+afterAll(() => { try { rmSync(base, { recursive: true, force: true }); } catch { /* noop */ } });
+
+let emitted: Array<{ channel: string; payload: unknown }> = [];
+function manager(root: string | null = base): MeetingManager {
+  return new MeetingManager(() => root, (channel, payload) => emitted.push({ channel, payload }));
+}
+beforeEach(() => { emitted = []; });
+
+function startOne(m: MeetingManager): MeetingMeta {
+  const res = m.start({
+    title: 'Sync',
+    sources: { mic: true, systemAudio: true, systemAudioDeviceLabel: 'Monitor of Built-in', screen: true },
+    language: 'auto',
+    model: 'whisper-base'
+  });
+  if (!res.ok) throw new Error(res.error);
+  return res.meta;
+}
+
+describe('MeetingManager lifecycle', () => {
+  it('creates the meeting folder + metadata and tracks the active id', () => {
+    const m = manager();
+    const meta = startOne(m);
+    expect(meta.status).toBe('recording');
+    expect(m.activeMeetingId()).toBe(meta.id);
+    const dir = m.meetingDir(meta.id)!;
+    expect(existsSync(join(dir, 'metadata.json'))).toBe(true);
+    expect(existsSync(join(dir, 'frames'))).toBe(true);
+    m.stop(meta.id, 12);
+  });
+
+  it('refuses a second concurrent meeting and frees the slot on stop', () => {
+    const m = manager();
+    const meta = startOne(m);
+    const second = m.start({ sources: { mic: true, systemAudio: false, screen: false }, language: 'en', model: 'whisper-tiny.en' });
+    expect(second.ok).toBe(false);
+    expect(m.stop(meta.id, 5).ok).toBe(true);
+    expect(m.activeMeetingId()).toBeNull();
+    const again = m.start({ sources: { mic: true, systemAudio: false, screen: false }, language: 'en', model: 'whisper-tiny.en' });
+    expect(again.ok).toBe(true);
+    if (again.ok) m.stop(again.meta.id, 1);
+  });
+
+  it('appends chunks and transcript rows; read() returns the full record', () => {
+    const m = manager();
+    const meta = startOne(m);
+    expect(m.appendChunk(meta.id, new Uint8Array([1, 2, 3])).ok).toBe(true);
+    expect(m.appendChunk(meta.id, new Uint8Array([4, 5])).ok).toBe(true);
+    const segs: TranscriptSegment[] = [
+      { t0: 1.2, t1: 3.4, source: 'mic', text: 'hello there' },
+      { t0: 4.0, t1: 6.0, source: 'system', text: 'hej med dig' }
+    ];
+    expect(m.appendTranscript(meta.id, segs).ok).toBe(true);
+    m.stop(meta.id, 7);
+    const read = m.read(meta.id);
+    expect(read.ok).toBe(true);
+    if (read.ok) {
+      expect(read.meta.status).toBe('ended');
+      expect(read.meta.recordingBytes).toBe(5);
+      expect(read.transcript).toHaveLength(2);
+      expect(read.transcript[1].source).toBe('system');
+    }
+    // The live feed event fired with the cleaned segments.
+    expect(emitted.some((e) => e.channel === 'meeting:transcript')).toBe(true);
+  });
+
+  it('drops empty/whitespace transcript segments instead of persisting junk', () => {
+    const m = manager();
+    const meta = startOne(m);
+    expect(m.appendTranscript(meta.id, [
+      { t0: 0, t1: 1, source: 'mic', text: '   ' },
+      { t0: 0, t1: 1, source: 'mic', text: '' }
+    ]).ok).toBe(true);
+    const read = m.read(meta.id);
+    if (read.ok) expect(read.transcript).toHaveLength(0);
+    m.stop(meta.id, 1);
+  });
+
+  it('marks orphaned recordings as interrupted on scan', () => {
+    const m = manager();
+    const meta = startOne(m);
+    // Simulate a crash: a NEW manager instance (no active id) scans the disk.
+    const fresh = manager();
+    const repaired = fresh.scanForOrphans();
+    expect(repaired).toBeGreaterThanOrEqual(1);
+    const read = fresh.read(meta.id);
+    if (read.ok) expect(read.meta.status).toBe('interrupted');
+  });
+
+  it('lists meetings newest-first with decorations', () => {
+    const m = manager();
+    const list = m.list();
+    expect(list.length).toBeGreaterThanOrEqual(1);
+    for (let i = 1; i < list.length; i++) {
+      expect(list[i - 1].startedAt >= list[i].startedAt).toBe(true);
+    }
+  });
+});
+
+describe('MeetingManager hardening', () => {
+  it('rejects traversal-shaped meeting ids everywhere', () => {
+    const m = manager();
+    for (const bad of ['../../etc', 'm-../x', 'm-a/b', '', 'nope', 'm-' + 'x'.repeat(200)]) {
+      expect(m.meetingDir(bad)).toBeNull();
+      expect(m.appendChunk(bad, new Uint8Array([1])).ok).toBe(false);
+      expect(m.writeFrame(bad, 0, new Uint8Array([1])).ok).toBe(false);
+      expect(m.appendTranscript(bad, []).ok).toBe(false);
+      expect(m.stop(bad).ok).toBe(false);
+    }
+  });
+
+  it('no-ops without an active project', () => {
+    const m = manager(null);
+    expect(m.enabled()).toBe(false);
+    const res = m.start({ sources: { mic: true, systemAudio: false, screen: false }, language: 'auto', model: 'whisper-base' });
+    expect(res.ok).toBe(false);
+    expect(m.list()).toEqual([]);
+  });
+
+  it('validates insights: unknown meeting, empty text, bad kind, traversal id', () => {
+    const m = manager();
+    const meta = startOne(m);
+    expect(m.ingestInsight('analyst', { meetingId: '../../etc', kind: 'note', text: 'x' }).ok).toBe(false);
+    expect(m.ingestInsight('analyst', { meetingId: meta.id, kind: 'note', text: '   ' }).ok).toBe(false);
+    // Unknown kind is coerced to 'note', not rejected (the text is still valuable).
+    expect(m.ingestInsight('analyst', { meetingId: meta.id, kind: 'whatever', text: 'a point' }).ok).toBe(true);
+    expect(m.ingestInsight('analyst', {
+      meetingId: meta.id,
+      kind: 'action-item',
+      text: 'Follow up with billing',
+      suggestedTask: { title: 'Email billing about the invoice', description: 'From the meeting' }
+    }).ok).toBe(true);
+    const read = m.read(meta.id);
+    if (read.ok) {
+      expect(read.insights).toHaveLength(2);
+      expect(read.insights[0].kind).toBe('note');
+      expect(read.insights[1].suggestedTask?.title).toContain('billing');
+    }
+    const dir = m.meetingDir(meta.id)!;
+    const raw = readFileSync(join(dir, 'insights.jsonl'), 'utf8');
+    expect(raw.trim().split('\n')).toHaveLength(2);
+    m.stop(meta.id, 2);
+  });
+});
