@@ -8,6 +8,7 @@ import { Icon } from '../Icon';
 import { ScreenSourcePicker } from './ScreenSourcePicker';
 import { MeetingHistory } from './MeetingHistory';
 import { InsightCard } from './InsightCard';
+import { TranscriptSelectionToTask } from './SelectionToTask';
 
 /**
  * The MEETING left-tab view. Two modes:
@@ -209,37 +210,39 @@ function LiveView() {
       )}
 
       <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: 10 }}>
-        {/* Transcript */}
-        <div
-          ref={feedRef}
-          style={{
-            flex: 3, minWidth: 0, minHeight: 0, overflowY: 'auto',
-            background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
-            padding: 10, display: 'flex', flexDirection: 'column', gap: 6
-          }}
-        >
-          {m.transcript.length === 0 ? (
-            <div style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>
-              Listening… the live transcript appears here a few seconds behind the conversation.
-            </div>
-          ) : (
-            m.transcript.map((s, i) => (
-              <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, lineHeight: '18px' }}>
-                <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-500)', flexShrink: 0, paddingTop: 1 }}>
-                  {fmtClock(s.t0)}
-                </span>
-                <span style={{
-                  flexShrink: 0, paddingTop: 1,
-                  fontFamily: 'var(--cth-font-display)', fontSize: 8,
-                  color: s.source === 'mic' ? 'var(--cth-teal, #14B8A6)' : 'var(--cth-ink-700)'
-                }}>
-                  {s.source === 'mic' ? 'ME' : 'THEM'}
-                </span>
-                <span style={{ color: 'var(--cth-ink-900)' }}>{s.text}</span>
+        {/* Transcript — select any lines to spin a task out of them. */}
+        <TranscriptSelectionToTask meeting={{ id: m.active?.id ?? '', title: m.active?.title ?? '' }} style={{ flex: 3 }}>
+          <div
+            ref={feedRef}
+            style={{
+              flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto',
+              background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+              padding: 10, display: 'flex', flexDirection: 'column', gap: 6
+            }}
+          >
+            {m.transcript.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>
+                Listening… the live transcript appears here a few seconds behind the conversation.
               </div>
-            ))
-          )}
-        </div>
+            ) : (
+              m.transcript.map((s, i) => (
+                <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, lineHeight: '18px' }}>
+                  <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-500)', flexShrink: 0, paddingTop: 1 }}>
+                    {fmtClock(s.t0)}
+                  </span>
+                  <span style={{
+                    flexShrink: 0, paddingTop: 1,
+                    fontFamily: 'var(--cth-font-display)', fontSize: 8,
+                    color: s.source === 'mic' ? 'var(--cth-teal, #14B8A6)' : 'var(--cth-ink-700)'
+                  }}>
+                    {s.source === 'mic' ? 'ME' : 'THEM'}
+                  </span>
+                  <span style={{ color: 'var(--cth-ink-900)' }}>{s.text}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </TranscriptSelectionToTask>
 
         {/* Analyst insights */}
         <div style={{

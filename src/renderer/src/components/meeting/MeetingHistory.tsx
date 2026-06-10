@@ -4,6 +4,7 @@ import { fmtClock, type MeetingMeta, type MeetingInsight, type TranscriptSegment
 import { PixelButton } from '../PixelButton';
 import { Markdown } from '../Markdown';
 import { InsightCard } from './InsightCard';
+import { TranscriptSelectionToTask } from './SelectionToTask';
 
 /** Past meetings: a compact list, expanding into the full record (summary,
  *  insights with task kick-off, transcript, reveal-recording). */
@@ -62,6 +63,12 @@ function MeetingDetail({ id, onBack }: { id: string; onBack: () => void }) {
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<'summary' | 'insights' | 'transcript'>('summary');
+  // Bumped when the analyst posts a late insight for THIS meeting (the wrap-up
+  // summary lands ~a minute after stop) — re-reads so summary/insights go live.
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => window.cth.meeting.onInsight((ins) => {
+    if (ins.meetingId === id) setRefresh((n) => n + 1);
+  }), [id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,14 +81,14 @@ function MeetingDetail({ id, onBack }: { id: string; onBack: () => void }) {
           insights: res.insights ?? [],
           summaryMd: res.summaryMd ?? null
         });
-        // Land on the most useful tab that has content.
-        if (!res.summaryMd) setTab((res.insights?.length ?? 0) > 0 ? 'insights' : 'transcript');
+        // Land on the most useful tab that has content (first load only).
+        if (refresh === 0 && !res.summaryMd) setTab((res.insights?.length ?? 0) > 0 ? 'insights' : 'transcript');
       } else {
         setError(!res.ok ? (res.error ?? 'failed to read meeting') : 'failed to read meeting');
       }
     }).catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); });
     return () => { cancelled = true; };
-  }, [id]);
+  }, [id, refresh]);
 
   if (error) {
     return (
@@ -157,20 +164,24 @@ function MeetingDetail({ id, onBack }: { id: string; onBack: () => void }) {
         {tab === 'transcript' && (
           transcript.length === 0
             ? <div style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>No transcript was captured.</div>
-            : transcript.map((s, i) => (
-                <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, lineHeight: '18px' }}>
-                  <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-500)', flexShrink: 0, paddingTop: 1 }}>
-                    {fmtClock(s.t0)}
-                  </span>
-                  <span style={{
-                    flexShrink: 0, paddingTop: 1, fontFamily: 'var(--cth-font-display)', fontSize: 8,
-                    color: s.source === 'mic' ? 'var(--cth-teal, #14B8A6)' : 'var(--cth-ink-700)'
-                  }}>
-                    {s.source === 'mic' ? 'ME' : 'THEM'}
-                  </span>
-                  <span style={{ color: 'var(--cth-ink-900)' }}>{s.text}</span>
-                </div>
-              ))
+            : (
+              <TranscriptSelectionToTask meeting={{ id: meta.id, title: meta.title }} style={{ flexDirection: 'column', gap: 6 }}>
+                {transcript.map((s, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, lineHeight: '18px' }}>
+                    <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-500)', flexShrink: 0, paddingTop: 1 }}>
+                      {fmtClock(s.t0)}
+                    </span>
+                    <span style={{
+                      flexShrink: 0, paddingTop: 1, fontFamily: 'var(--cth-font-display)', fontSize: 8,
+                      color: s.source === 'mic' ? 'var(--cth-teal, #14B8A6)' : 'var(--cth-ink-700)'
+                    }}>
+                      {s.source === 'mic' ? 'ME' : 'THEM'}
+                    </span>
+                    <span style={{ color: 'var(--cth-ink-900)' }}>{s.text}</span>
+                  </div>
+                ))}
+              </TranscriptSelectionToTask>
+            )
         )}
       </div>
     </div>
