@@ -106,6 +106,7 @@ export const useMeetingStore = create<MeetingStore>((set, get) => ({
   start: async () => {
     const { status, setup, devices } = get();
     if (status !== 'idle' || isCapturing()) return;
+    stopRequestedWhileStarting = null;
     set({ status: 'starting', error: null, notice: null, transcript: [], insights: [], elapsedSec: 0, analystDown: false });
     try {
       const cfg = await window.cth.getConfig();
@@ -149,8 +150,15 @@ export const useMeetingStore = create<MeetingStore>((set, get) => ({
         frameIntervalSec: cfg.meetingFrameIntervalSec ?? 15,
         sttModel: cfg.meetingSttModel ?? 'whisper-base',
         language: cfg.meetingLanguage ?? 'auto',
-        onLevel: (source, rms) => set({ levels: { ...get().levels, [source]: rms } }),
-        onBacklog: (depth) => set({ sttBacklog: depth }),
+        onLevel: (source, rms) => {
+          // Quantize + skip identical writes: raw RMS at ~4 Hz/source would
+          // re-render every store consumer all meeting long for invisible deltas.
+          const q = Math.round(rms * 40) / 40;
+          const cur = get().levels;
+          if (cur[source] === q) return;
+          set({ levels: { ...cur, [source]: q } });
+        },
+        onBacklog: (depth) => { if (get().sttBacklog !== depth) set({ sttBacklog: depth }); },
         onAutoStop: (reason) => { void get().stop(reason); },
         onError: (message) => set({ error: message })
       });
@@ -162,6 +170,14 @@ export const useMeetingStore = create<MeetingStore>((set, get) => ({
 
       startTicker();
       set({ status: 'recording', active: meta });
+      // A stop that landed while we were still starting (auto-stop on a track
+      // that died instantly, a user mash) must win — finish it now that the
+      // engine is fully up, instead of leaving a ghost "recording".
+      if (stopRequestedWhileStarting !== null) {
+        const r = stopRequestedWhileStarting;
+        stopRequestedWhileStarting = null;
+        await get().stop(r ?? undefined);
+      }
     } catch (e) {
       stopTicker();
       set({ status: 'idle', active: null, error: e instanceof Error ? e.message : String(e) });
@@ -170,7 +186,14 @@ export const useMeetingStore = create<MeetingStore>((set, get) => ({
 
   stop: async (reason) => {
     const { status, active, elapsedSec } = get();
-    if (status !== 'recording' && status !== 'starting') return;
+    if (status === 'starting') {
+      // The engine is mid-assembly — park the request; start() executes it the
+      // moment the capture is fully up (stopping halfway would race teardown
+      // against construction).
+      stopRequestedWhileStarting = reason ?? '';
+      return;
+    }
+    if (status !== 'recording') return;
     set({ status: 'stopping', notice: reason ?? null });
     stopTicker();
     try {
@@ -247,6 +270,10 @@ export const useMeetingStore = create<MeetingStore>((set, get) => ({
 
 // ─── Module-scoped lifecycle (one ticker + one subscription set) ──────────────
 
+/** A stop that arrived while status was 'starting' — executed by start() once the
+ *  engine is fully up. '' = stop with no notice; null = none pending. */
+let stopRequestedWhileStarting: string | null = null;
+
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 function startTicker(): void {
   stopTicker();
@@ -263,8 +290,23 @@ let refCount = 0;
 let unsubs: Array<() => void> = [];
 
 function startLifecycle(): void {
-  void useMeetingStore.getState().refreshDevices();
+  // NB: deliberately NO refreshDevices() here — listing devices can open a
+  // throwaway mic stream to reveal labels, and this lifecycle starts at app
+  // launch (MeetingPanel is always mounted). The device probe waits until the
+  // user actually opens the meeting tab (see MeetingPanel's visibility effect).
   void useMeetingStore.getState().loadMeetings();
+  // Reconcile a recording orphaned by a renderer reload: main still holds it
+  // active (blocking every new start) but our capture engine died with the old
+  // page. Abort it → marked 'interrupted', slot freed.
+  void (async () => {
+    try {
+      const list = await window.cth.meeting.list();
+      if (!isCapturing() && list.some((m) => m.status === 'recording')) {
+        await window.cth.meeting.abortActive();
+        await useMeetingStore.getState().loadMeetings();
+      }
+    } catch { /* best-effort */ }
+  })();
   unsubs = [
     window.cth.meeting.onTranscript(({ meetingId, segments }) => {
       const s = useMeetingStore.getState();
@@ -285,6 +327,20 @@ function startLifecycle(): void {
       const s = useMeetingStore.getState();
       if (s.active?.id !== meetingId) return;
       useMeetingStore.setState({ notice: reason });
+    }),
+    // Main ended our meeting from the outside (teardown/abort while this renderer
+    // is alive) — tear the local engine down and go honest-idle instead of
+    // showing a ghost REC over a dead recording.
+    window.cth.meeting.onState((meta) => {
+      const s = useMeetingStore.getState();
+      if (s.active?.id !== meta.id || meta.status === 'recording' || s.status !== 'recording') return;
+      stopTicker();
+      void stopCapture().catch(() => { /* already down */ });
+      useMeetingStore.setState({
+        status: 'idle', active: null, levels: { mic: 0, system: 0 }, sttBacklog: 0,
+        notice: 'the meeting was ended by the system'
+      });
+      void s.loadMeetings();
     })
   ];
 }

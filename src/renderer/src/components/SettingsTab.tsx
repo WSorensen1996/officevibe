@@ -36,6 +36,45 @@ const MEETING_LANGUAGES: { id: MeetingLanguage; label: string }[] = [
   { id: 'en', label: 'English' }
 ];
 
+/** The radio-card grid both model pickers (DICTATION + MEETINGS) render through,
+ *  so the two sections can't drift apart visually. */
+function ModelCardPicker<Id extends string>({ options, value, onPick }: {
+  options: { id: Id; title: string; detail: string }[];
+  value: Id;
+  onPick: (id: Id) => void;
+}) {
+  return (
+    <div style={{ display: 'flex', gap: 8 }}>
+      {options.map((m) => {
+        const sel = value === m.id;
+        return (
+          <button
+            key={m.id}
+            onClick={() => onPick(m.id)}
+            style={{
+              flex: 1, textAlign: 'left', cursor: 'pointer', border: 'none',
+              padding: '7px 9px 6px',
+              background: sel ? 'var(--cth-lemon-light)' : 'var(--cth-cream-100)',
+              boxShadow: sel ? 'inset 0 0 0 2px var(--cth-ink-900)' : 'inset 0 0 0 1px var(--cth-ink-300)',
+              fontFamily: 'var(--cth-font-ui)'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 13, color: 'var(--cth-ink-900)' }}>
+              <span style={{
+                width: 8, height: 8, flexShrink: 0,
+                background: sel ? 'var(--cth-ink-900)' : 'transparent',
+                boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)'
+              }} />
+              {m.title}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: 3 }}>{m.detail}</div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Human-readable label for the backend the dictation worker actually loaded on —
  *  the in-app GPU-vs-CPU proof (task 5z52). null until the first dictation warms
  *  the worker (it only loads the model on first mic use). */
@@ -420,34 +459,7 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
           <div style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
             Running on: <strong style={{ color: 'var(--cth-ink-900)' }}>{sttBackendLabel(sttBackend)}</strong>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {STT_MODELS.map((m) => {
-              const sel = sttModel === m.id;
-              return (
-                <button
-                  key={m.id}
-                  onClick={() => pickSttModel(m.id)}
-                  style={{
-                    flex: 1, textAlign: 'left', cursor: 'pointer', border: 'none',
-                    padding: '7px 9px 6px',
-                    background: sel ? 'var(--cth-lemon-light)' : 'var(--cth-cream-100)',
-                    boxShadow: sel ? 'inset 0 0 0 2px var(--cth-ink-900)' : 'inset 0 0 0 1px var(--cth-ink-300)',
-                    fontFamily: 'var(--cth-font-ui)'
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 13, color: 'var(--cth-ink-900)' }}>
-                    <span style={{
-                      width: 8, height: 8, flexShrink: 0,
-                      background: sel ? 'var(--cth-ink-900)' : 'transparent',
-                      boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)'
-                    }} />
-                    {m.title}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: 3 }}>{m.detail}</div>
-                </button>
-              );
-            })}
-          </div>
+          <ModelCardPicker options={STT_MODELS} value={sttModel} onPick={pickSttModel} />
         </div>
       </Section>
 
@@ -459,34 +471,7 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
           </div>
           <div>
             <div style={{ ...labelStyle, marginBottom: 4 }}>Transcription model</div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {MEETING_STT_MODELS.map((m) => {
-                const sel = meetingSttModel === m.id;
-                return (
-                  <button
-                    key={m.id}
-                    onClick={() => pickMeetingSttModel(m.id)}
-                    style={{
-                      flex: 1, textAlign: 'left', cursor: 'pointer', border: 'none',
-                      padding: '7px 9px 6px',
-                      background: sel ? 'var(--cth-lemon-light)' : 'var(--cth-cream-100)',
-                      boxShadow: sel ? 'inset 0 0 0 2px var(--cth-ink-900)' : 'inset 0 0 0 1px var(--cth-ink-300)',
-                      fontFamily: 'var(--cth-font-ui)'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 13, color: 'var(--cth-ink-900)' }}>
-                      <span style={{
-                        width: 8, height: 8, flexShrink: 0,
-                        background: sel ? 'var(--cth-ink-900)' : 'transparent',
-                        boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)'
-                      }} />
-                      {m.title}
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: 3 }}>{m.detail}</div>
-                  </button>
-                );
-              })}
-            </div>
+            <ModelCardPicker options={MEETING_STT_MODELS} value={meetingSttModel} onPick={pickMeetingSttModel} />
           </div>
           <div>
             <div style={{ ...labelStyle, marginBottom: 4 }}>Meeting language</div>

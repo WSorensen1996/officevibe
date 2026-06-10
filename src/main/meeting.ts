@@ -95,6 +95,10 @@ export class MeetingManager {
   /** The meeting currently being recorded (at most one at a time), or null. */
   private activeId: string | null = null;
 
+  /** Per-meeting live segment counter — persisted into metadata at stop/abort so
+   *  list() never has to read whole transcript files just to show a count. */
+  private segmentCounts = new Map<string, number>();
+
   /** Phase-4 hook: the analysis driver subscribes to fresh transcript segments. */
   private transcriptListener: ((meetingId: string, segments: TranscriptSegment[]) => void) | null = null;
   setTranscriptListener(fn: ((meetingId: string, segments: TranscriptSegment[]) => void) | null): void {
@@ -207,6 +211,7 @@ export class MeetingManager {
         clean.map((s) => JSON.stringify(s)).join('\n') + '\n',
         'utf8'
       );
+      this.segmentCounts.set(id, (this.segmentCounts.get(id) ?? 0) + clean.length);
       this.emit?.('meeting:transcript', { meetingId: id, segments: clean });
       try { this.transcriptListener?.(id, clean); } catch { /* driver hiccup — never block the feed */ }
       return { ok: true };
@@ -225,6 +230,8 @@ export class MeetingManager {
     meta.durationSec = typeof durationSec === 'number' && durationSec >= 0
       ? Math.round(durationSec)
       : Math.max(0, Math.round((Date.parse(meta.endedAt) - Date.parse(meta.startedAt)) / 1000));
+    meta.segmentCount = this.segmentCounts.get(id) ?? meta.segmentCount;
+    this.segmentCounts.delete(id);
     try {
       atomicWriteJson(join(dir, 'metadata.json'), meta);
       if (this.activeId === id) this.activeId = null;
@@ -233,6 +240,33 @@ export class MeetingManager {
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
+  }
+
+  /** Forcibly end whatever is recording, marking it 'interrupted'. The capture
+   *  engine lives in the renderer, so a renderer reload or in-process project
+   *  switch kills the capture while this manager still holds activeId — without
+   *  this, every later start() is rejected with "already recording" until a full
+   *  app restart (and scanForOrphans deliberately skips the active id). Called
+   *  from teardownServices and from the renderer's boot reconciliation. */
+  abortActive(): { ok: boolean } {
+    const id = this.activeId;
+    if (!id) return { ok: true };
+    this.activeId = null;
+    this.segmentCounts.delete(id);
+    // Best-effort metadata repair — on a project SWITCH the root has already
+    // moved, so the dir may not resolve; the old project's boot-time orphan scan
+    // repairs it then (activeId is clear, so the skip no longer applies).
+    const dir = this.meetingDir(id);
+    if (dir && existsSync(dir)) {
+      const meta = this.readMeta(dir);
+      if (meta && meta.status === 'recording') {
+        meta.status = 'interrupted';
+        meta.endedAt = new Date().toISOString();
+        meta.durationSec = Math.max(0, Math.round((Date.parse(meta.endedAt) - Date.parse(meta.startedAt)) / 1000));
+        try { atomicWriteJson(join(dir, 'metadata.json'), meta); this.emitState(meta); } catch { /* orphan scan will retry */ }
+      }
+    }
+    return { ok: true };
   }
 
   /** Boot-time janitor: any meeting still marked 'recording' that is NOT the live
@@ -276,10 +310,11 @@ export class MeetingManager {
     const meta = this.readMeta(dir);
     if (!meta) return { ok: false, error: 'missing metadata' };
     const recording = join(dir, 'recording.webm');
+    const transcript = this.readJsonl<TranscriptSegment>(join(dir, 'transcript.jsonl'));
     return {
       ok: true,
-      meta: this.decorate(dir, meta),
-      transcript: this.readJsonl<TranscriptSegment>(join(dir, 'transcript.jsonl')),
+      meta: { ...this.decorate(dir, meta), segmentCount: transcript.length },
+      transcript,
       insights: this.readJsonl<MeetingInsight>(join(dir, 'insights.jsonl')),
       summaryMd: existsSync(join(dir, 'summary.md'))
         ? readFileSync(join(dir, 'summary.md'), 'utf8')
@@ -341,21 +376,19 @@ export class MeetingManager {
     }
   }
 
-  /** Cheap display-only enrichments computed at read time (never persisted hot). */
+  /** Cheap display-only enrichments computed at read time. Deliberately does NOT
+   *  read transcript.jsonl — list() runs over every past meeting and a 2h
+   *  transcript is hundreds of KB; the count comes from metadata (persisted at
+   *  stop/abort) or the live counter for the active meeting. */
   private decorate(dir: string, meta: MeetingMeta): MeetingMeta {
     let recordingBytes: number | undefined;
     try { recordingBytes = statSync(join(dir, 'recording.webm')).size; } catch { /* none yet */ }
-    let segmentCount: number | undefined;
-    try {
-      const raw = readFileSync(join(dir, 'transcript.jsonl'), 'utf8');
-      segmentCount = raw ? raw.trim().split('\n').filter(Boolean).length : 0;
-    } catch { /* none yet */ }
     return {
       ...meta,
       hasRecording: recordingBytes != null && recordingBytes > 0,
       hasSummary: existsSync(join(dir, 'summary.md')),
       recordingBytes,
-      segmentCount
+      segmentCount: this.segmentCounts.get(meta.id) ?? meta.segmentCount
     };
   }
 
@@ -431,10 +464,6 @@ export class MeetingAnalysisDriver {
   /** Total transcript chars seen this meeting — gates the wrap-up (no speech, no summary). */
   private totalChars = 0;
 
-  active(): string | null {
-    return this.meetingId;
-  }
-
   attach(meetingId: string, title: string): void {
     this.detach();
     this.meetingId = meetingId;
@@ -459,6 +488,7 @@ export class MeetingAnalysisDriver {
     const dir = this.deps.manager.meetingDir(meetingId);
     const hadSpeech = this.totalChars > 0;
     const tail = this.pending;
+    const title = this.titleOr(meetingId); // capture BEFORE detach clears it
     this.detach();
     if (!dir || !hadSpeech || !this.deps.isAnalystLive()) return; // nothing to summarize / nobody to ask
     const tailLines = tail.length
@@ -469,7 +499,7 @@ export class MeetingAnalysisDriver {
       act: 'inform',
       subject: `Meeting ended — write the summary (${meetingId})`,
       body: [
-        `The meeting "${this.titleOr(meetingId)}" has ENDED. Wrap-up time:`,
+        `The meeting "${title}" has ENDED. Wrap-up time:`,
         `1. Read the full transcript: ${join(dir, 'transcript.jsonl')} (one JSON row per segment; t0/t1 = seconds, source mic = the human "ME", system = the other participants "THEM").`,
         `2. If visuals matter, frames are in ${join(dir, 'frames')}/.`,
         `3. Write a concise summary to ${join(dir, 'summary.md')} with sections: ## TL;DR, ## Decisions, ## Action items (owner → what), ## Open questions.`,

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMeeting } from '@/hooks/useMeeting';
+import { useStore } from '@/store/store';
 import { fmtClock } from '@/lib/meeting/types';
 import { PixelPanel } from '../PixelPanel';
 import { PixelButton } from '../PixelButton';
@@ -9,6 +10,7 @@ import { ScreenSourcePicker } from './ScreenSourcePicker';
 import { MeetingHistory } from './MeetingHistory';
 import { InsightCard } from './InsightCard';
 import { TranscriptSelectionToTask } from './SelectionToTask';
+import { TranscriptRow } from './TranscriptRow';
 
 /**
  * The MEETING left-tab view. Two modes:
@@ -22,6 +24,17 @@ import { TranscriptSelectionToTask } from './SelectionToTask';
 export function MeetingPanel() {
   const m = useMeeting();
   const recording = m.status === 'recording' || m.status === 'stopping';
+  // Device listing can open a throwaway mic stream (to reveal labels), so it
+  // waits for the user to actually open this tab — never at app launch (the
+  // panel is permanently mounted behind a display toggle).
+  const visible = useStore((s) => s.leftTab === 'meeting');
+  const probed = useRef(false);
+  useEffect(() => {
+    if (!visible || probed.current) return;
+    probed.current = true;
+    void m.refreshDevices();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
 
   return (
     <PixelPanel variant="default" noPadding style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -155,12 +168,15 @@ function LiveView() {
   const m = useMeeting();
   const feedRef = useRef<HTMLDivElement | null>(null);
   // Keep the transcript pinned to the newest line unless the user scrolled up.
+  // Keyed on the ARRAY (a new one per event), not its length — the feed is capped
+  // at FEED_CAP, so length freezes there and a length dep would stop re-pinning
+  // for the rest of a long meeting.
   useEffect(() => {
     const el = feedRef.current;
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     if (nearBottom) el.scrollTop = el.scrollHeight;
-  }, [m.transcript.length]);
+  }, [m.transcript]);
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -225,21 +241,7 @@ function LiveView() {
                 Listening… the live transcript appears here a few seconds behind the conversation.
               </div>
             ) : (
-              m.transcript.map((s, i) => (
-                <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, lineHeight: '18px' }}>
-                  <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-500)', flexShrink: 0, paddingTop: 1 }}>
-                    {fmtClock(s.t0)}
-                  </span>
-                  <span style={{
-                    flexShrink: 0, paddingTop: 1,
-                    fontFamily: 'var(--cth-font-display)', fontSize: 8,
-                    color: s.source === 'mic' ? 'var(--cth-teal, #14B8A6)' : 'var(--cth-ink-700)'
-                  }}>
-                    {s.source === 'mic' ? 'ME' : 'THEM'}
-                  </span>
-                  <span style={{ color: 'var(--cth-ink-900)' }}>{s.text}</span>
-                </div>
-              ))
+              m.transcript.map((s, i) => <TranscriptRow key={i} segment={s} />)
             )}
           </div>
         </TranscriptSelectionToTask>

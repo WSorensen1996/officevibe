@@ -15,12 +15,25 @@ class PcmTapProcessor extends AudioWorkletProcessor {
   }
 
   process(inputs) {
-    const ch = inputs[0] && inputs[0][0]; // first input, channel 0 (mono graph)
-    if (ch && ch.length) {
+    const input = inputs[0];
+    const ch0 = input && input[0];
+    if (ch0 && ch0.length) {
+      // Downmix ALL channels to mono — system audio is typically stereo, and
+      // reading only channel 0 would drop hard-right-panned speech entirely.
+      let mono = ch0;
+      if (input.length > 1) {
+        mono = new Float32Array(ch0.length);
+        for (let c = 0; c < input.length; c++) {
+          const ch = input[c];
+          for (let i = 0; i < ch.length; i++) mono[i] += ch[i];
+        }
+        const inv = 1 / input.length;
+        for (let i = 0; i < mono.length; i++) mono[i] *= inv;
+      }
       let off = 0;
-      while (off < ch.length) {
-        const n = Math.min(ch.length - off, this._buf.length - this._fill);
-        this._buf.set(ch.subarray(off, off + n), this._fill);
+      while (off < mono.length) {
+        const n = Math.min(mono.length - off, this._buf.length - this._fill);
+        this._buf.set(mono.subarray(off, off + n), this._fill);
         this._fill += n;
         off += n;
         if (this._fill === this._buf.length) {

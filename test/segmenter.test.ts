@@ -23,6 +23,20 @@ function concat(...parts: Float32Array[]): Float32Array {
   for (const p of parts) { out.set(p, off); off += p.length; }
   return out;
 }
+/** Realistic continuous speech: loud bursts with brief near-silent breath dips
+ *  (~120ms every ~800ms — too short to close a segment, but they keep the
+ *  per-segment minimum at ambient so the continuous-NOISE escape never fires). */
+function speech(ms: number): Float32Array {
+  const parts: Float32Array[] = [];
+  let left = ms;
+  while (left > 0) {
+    const burst = Math.min(800, left);
+    parts.push(tone(burst));
+    left -= burst;
+    if (left > 0) { const dip = Math.min(120, left); parts.push(silence(dip)); left -= dip; }
+  }
+  return concat(...parts);
+}
 
 /** Feed audio in tap-sized batches (2048 samples) like the worklet does. */
 function run(audio: Float32Array, flush = true): RawSegment[] {
@@ -60,7 +74,9 @@ describe('PcmSegmenter', () => {
   });
 
   it('force-cuts a monologue at the 25s window', () => {
-    const segs = run(concat(silence(300), tone(27_000), silence(800)));
+    // speech() (bursts with breath dips), NOT a constant tone — an unbroken sine
+    // is indistinguishable from a hum and rightly trips the noise escape instead.
+    const segs = run(concat(silence(300), speech(27_000), silence(800)));
     expect(segs.length).toBeGreaterThanOrEqual(2);
     expect((segs[0].t1 - segs[0].t0)).toBeLessThanOrEqual(25.2);
   });
@@ -90,5 +106,28 @@ describe('PcmSegmenter', () => {
     // Noisy ambient (rms ~0.008) for 3s, then clearly louder speech.
     const segs = run(concat(silence(3000, 0.012), tone(1200, 0.35), silence(1000, 0.012)));
     expect(segs.length).toBe(1);
+  });
+
+  it('escapes continuous noise above the start threshold instead of segmenting forever', () => {
+    // A constant hum (rms ~0.02 — above startThreshold) for 3 minutes: the
+    // per-segment minimum pulls the floor up, so after a few force-closed
+    // 25s chunks the threshold clears the hum and emission stops.
+    const segs = run(tone(180_000, 0.03, 60));
+    // Unbounded behavior would be ~7 segments (180s / 25s); the escape caps it.
+    expect(segs.length).toBeLessThanOrEqual(3);
+  });
+
+  it('flush() seals the segmenter — late pushes cannot reopen a segment', () => {
+    const segments: ReturnType<typeof run> = [];
+    const seg = new PcmSegmenter((s) => segments.push(s));
+    const audio = concat(silence(300), tone(1000));
+    for (let off = 0; off < audio.length; off += 2048) {
+      seg.push(audio.subarray(off, Math.min(off + 2048, audio.length)));
+    }
+    seg.flush();
+    const after = segments.length;
+    seg.push(tone(2000)); // a straggler worklet message after meeting stop
+    seg.flush();
+    expect(segments.length).toBe(after); // nothing new
   });
 });

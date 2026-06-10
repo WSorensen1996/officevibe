@@ -654,6 +654,8 @@ const api = {
     /** Finalize the meeting (status, endedAt, duration). */
     stop: (id: string, durationSec?: number): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('meeting:stop', id, durationSec),
+    /** Force-end a recording orphaned by a renderer reload (marks it interrupted). */
+    abortActive: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('meeting:abortActive'),
     list: (): Promise<MeetingMeta[]> => ipcRenderer.invoke('meeting:list'),
     read: (id: string): Promise<MeetingReadResult> => ipcRenderer.invoke('meeting:read', id),
     /** Show the recording (or meeting folder) in the OS file manager. */

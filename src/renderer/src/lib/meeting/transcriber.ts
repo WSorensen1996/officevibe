@@ -11,6 +11,7 @@
 // depth doubles as the "transcription lagging" signal.
 
 import type { RawSegment } from './segmenter';
+import { mtgLog as log, assetBase } from './util';
 
 export interface TranscribedSegment {
   t0: number;
@@ -24,18 +25,17 @@ interface QueueItem {
   source: 'mic' | 'system';
 }
 
-function log(level: 'log' | 'error', ...parts: unknown[]): void {
-  (level === 'error' ? console.error : console.log)('[meeting][stt]', ...parts);
-  try { window.cth?.sttLog?.(level, ['[meeting]', ...parts.map((p) => (p instanceof Error ? p.message : p))]); } catch { /* noop */ }
-}
+/** Never settle a single segment longer than this — a worker that stops
+ *  answering (WASM abort that fires no onerror) must not freeze the queue for
+ *  the rest of the meeting. Generous: base-q8 on one WASM thread does ~real-time. */
+const SEGMENT_TIMEOUT_MS = 180_000;
 
-/** Same-origin base the vendored model/wasm assets are served from. */
-function assetBase(): string {
-  return new URL('.', window.location.href).href;
-}
-
-/** transformers.js whisper takes full language names; map our config codes. */
-function languageName(code: string | undefined): string | undefined {
+/** transformers.js whisper takes full language names; map our config codes.
+ *  CRITICAL: the .en models THROW on any language/task option ("Cannot specify
+ *  `task` or `language` for an English-only model"), so a pinned language must
+ *  only ever reach a multilingual model. */
+function languageName(code: string | undefined, model: string): string | undefined {
+  if (model.endsWith('.en')) return undefined; // English-only — option forbidden
   switch (code) {
     case 'da': return 'danish';
     case 'en': return 'english';
@@ -57,7 +57,10 @@ export class MeetingTranscriber {
     private readonly model: string,
     private readonly language: string | undefined,
     private readonly onResult: (seg: TranscribedSegment) => void,
-    private readonly onBacklog?: (depth: number) => void
+    private readonly onBacklog?: (depth: number) => void,
+    /** The worker is irrecoverably gone (hard crash / wedged) — transcription is
+     *  over for this meeting; the recording must keep going. */
+    private readonly onFatal?: (message: string) => void
   ) {}
 
   /** Create + warm the worker (model load happens here, ~seconds once). */
@@ -77,7 +80,13 @@ export class MeetingTranscriber {
         else if (m.type === 'result-error') { this.pending.get(m.id!)?.reject(new Error(m.message || 'transcribe failed')); this.pending.delete(m.id!); }
         else if (m.type === 'log') { try { window.cth?.sttLog?.(m.level ?? 'log', ['[meeting-worker]', ...(m.parts ?? [])]); } catch { /* noop */ } }
       };
-      w.onerror = (e) => reject(new Error(e.message || 'meeting speech worker failed to load'));
+      w.onerror = (e) => {
+        // Before ready: a load failure (rejects init). After ready: a hard crash
+        // mid-meeting — without this, the in-flight promise never settles and the
+        // serial pump stays "running" forever, silently freezing transcription.
+        reject(new Error(e.message || 'meeting speech worker failed to load'));
+        this.fatal(e.message || 'speech worker crashed');
+      };
       // Always CPU/WASM for meetings — never contend with the Pixi floor's GPU.
       w.postMessage({ type: 'init', base: assetBase(), model: this.model, device: 'wasm' });
     });
@@ -111,6 +120,16 @@ export class MeetingTranscriber {
     this.ready = null;
   }
 
+  /** Irrecoverable worker failure: settle everything, tell the engine, shut down.
+   *  drain() then resolves naturally (queue empty + the rejected in-flight
+   *  promise resets `running` via pump's finally). */
+  private fatal(message: string): void {
+    if (this.disposed) return;
+    log('error', 'meeting transcriber fatal:', message);
+    try { this.onFatal?.(message); } catch { /* noop */ }
+    this.dispose();
+  }
+
   private async pump(): Promise<void> {
     if (this.running || this.disposed) return;
     const item = this.queue.shift();
@@ -138,8 +157,19 @@ export class MeetingTranscriber {
     const id = this.nextId++;
     return new Promise<string>((resolve, reject) => {
       if (!this.worker) { reject(new Error('worker gone')); return; }
-      this.pending.set(id, { resolve, reject });
-      const language = languageName(this.language);
+      // A worker that stops answering entirely (WASM abort without onerror) must
+      // not wedge the serial pump for the rest of the meeting.
+      const timer = setTimeout(() => {
+        if (!this.pending.has(id)) return;
+        this.pending.delete(id);
+        reject(new Error('transcribe timed out'));
+        this.fatal('speech worker stopped responding');
+      }, SEGMENT_TIMEOUT_MS);
+      this.pending.set(id, {
+        resolve: (t) => { clearTimeout(timer); resolve(t); },
+        reject: (e) => { clearTimeout(timer); reject(e); }
+      });
+      const language = languageName(this.language, this.model);
       this.worker.postMessage(
         { type: 'transcribe', id, pcm, ...(language ? { opts: { language } } : {}) },
         [pcm.buffer]

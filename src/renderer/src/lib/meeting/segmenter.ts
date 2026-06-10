@@ -68,6 +68,15 @@ export class PcmSegmenter {
   /** Pre-roll length captured when the segment opened — excluded (with the
    *  trailing silence) from the blip-filter's SPEECH duration. */
   private openPrerollSamples = 0;
+  /** Quietest window inside the current segment — the noise bed UNDER the speech.
+   *  Nudges the floor up on close, so continuous noise above startThreshold
+   *  (fan/music) can't hold the segmenter open forever (the ambient EMA never
+   *  runs while "speaking"). Real speech has breath pauses, so its minimum stays
+   *  near true ambient and barely moves the floor. */
+  private segMinRms = Infinity;
+  /** Set by flush(): the meeting is over, late tap messages must not reopen a
+   *  segment that nobody will ever flush again. */
+  private sealed = false;
   /** Ring of recent non-speech windows for the pre-roll. */
   private preroll: Float32Array[] = [];
   private prerollSamples = 0;
@@ -78,6 +87,7 @@ export class PcmSegmenter {
   }
 
   push(batch: Float32Array): void {
+    if (this.sealed) return;
     let data = batch;
     if (this.remainder && this.remainder.length) {
       const joined = new Float32Array(this.remainder.length + batch.length);
@@ -92,10 +102,12 @@ export class PcmSegmenter {
     this.remainder = off < data.length ? data.slice(off) : null;
   }
 
-  /** Meeting over — emit whatever is still open (if long enough). */
+  /** Meeting over — emit whatever is still open (if long enough) and seal the
+   *  segmenter against the worklet's last in-flight messages. */
   flush(): void {
     if (this.speaking) this.close();
     this.remainder = null;
+    this.sealed = true;
   }
 
   private window(w: Float32Array): void {
@@ -114,6 +126,7 @@ export class PcmSegmenter {
         this.speechStartSample = this.consumed - this.prerollSamples;
         this.silentSamples = 0;
         this.openPrerollSamples = this.prerollSamples;
+        this.segMinRms = rms;
         this.preroll = [];
         this.prerollSamples = 0;
       } else {
@@ -129,6 +142,7 @@ export class PcmSegmenter {
     } else {
       this.speech.push(w.slice());
       this.speechSamples += w.length;
+      this.segMinRms = Math.min(this.segMinRms, rms);
       this.silentSamples = rms < threshold ? this.silentSamples + w.length : 0;
       if (ms(this.silentSamples) >= this.o.silenceMs || ms(this.speechSamples) >= this.o.maxSegmentMs) {
         this.close();
@@ -146,6 +160,17 @@ export class PcmSegmenter {
     const startSample = this.speechStartSample;
     const trailing = this.silentSamples;
     this.silentSamples = 0;
+
+    // Continuous-noise escape: the segment's quietest window is the noise bed
+    // under the "speech". If even that sits above the floor (a fan/music hum
+    // opened this segment, not a voice), pull the floor halfway up to it — after
+    // a couple of force-closed segments the threshold (floor × factor) clears
+    // the hum and the segmenter goes quiet. Genuine speech has near-ambient
+    // breath pauses, so segMinRms ≈ floor and this is a no-op.
+    if (this.segMinRms !== Infinity && this.segMinRms > this.noiseFloor) {
+      this.noiseFloor = this.noiseFloor * 0.5 + this.segMinRms * 0.5;
+    }
+    this.segMinRms = Infinity;
 
     // The blip filter measures actual SPEECH — pre-roll and the silence hangover
     // are padding, not voice, and would let a 100ms click masquerade as ~1s.

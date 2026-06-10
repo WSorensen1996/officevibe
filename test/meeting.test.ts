@@ -86,6 +86,38 @@ describe('MeetingManager lifecycle', () => {
     m.stop(meta.id, 1);
   });
 
+  it('abortActive frees the slot and marks the meeting interrupted (renderer-reload recovery)', () => {
+    const m = manager();
+    const meta = startOne(m);
+    m.appendTranscript(meta.id, [{ t0: 0, t1: 1, source: 'mic', text: 'hello' }]);
+    expect(m.abortActive().ok).toBe(true);
+    expect(m.activeMeetingId()).toBeNull();
+    const read = m.read(meta.id);
+    expect(read.ok).toBe(true);
+    if (read.ok) {
+      expect(read.meta.status).toBe('interrupted');
+      expect(read.meta.segmentCount).toBe(1);
+    }
+    // The slot is genuinely free again.
+    const again = m.start({ sources: { mic: true, systemAudio: false, screen: false }, language: 'en', model: 'whisper-tiny.en' });
+    expect(again.ok).toBe(true);
+    if (again.ok) m.stop(again.meta.id, 1);
+  });
+
+  it('persists segmentCount into metadata at stop so list() never reads transcripts', () => {
+    const m = manager();
+    const meta = startOne(m);
+    m.appendTranscript(meta.id, [
+      { t0: 0, t1: 1, source: 'mic', text: 'one' },
+      { t0: 1, t1: 2, source: 'system', text: 'two' }
+    ]);
+    m.stop(meta.id, 3);
+    // A FRESH manager (no in-memory counter) must still see the count via metadata.
+    const fresh = manager();
+    const listed = fresh.list().find((x) => x.id === meta.id);
+    expect(listed?.segmentCount).toBe(2);
+  });
+
   it('marks orphaned recordings as interrupted on scan', () => {
     const m = manager();
     const meta = startOne(m);
@@ -280,6 +312,7 @@ describe('MeetingAnalysisDriver', () => {
     expect(h.sent[0].subject).toContain('summary');
     expect(h.sent[0].body).toContain('summary.md');
     expect(h.sent[0].body).toContain('transcript.jsonl');
+    expect(h.sent[0].body).toContain(`"${h.meta.title}"`); // title captured before detach
 
     const h2 = harness();
     h2.speak('more words here');

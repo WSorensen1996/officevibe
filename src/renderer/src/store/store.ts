@@ -459,7 +459,7 @@ const initialLeftTab: LeftTab = (() => {
   try {
     const v = window.localStorage.getItem(LS_LEFT_TAB);
     if (v === 'office' || v === 'terminal' || v === 'browser'
-      || v === 'messages') return v;
+      || v === 'messages' || v === 'meeting') return v;
   } catch { /* noop */ }
   return 'office';
 })();

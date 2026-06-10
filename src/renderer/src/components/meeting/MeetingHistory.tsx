@@ -5,6 +5,7 @@ import { PixelButton } from '../PixelButton';
 import { Markdown } from '../Markdown';
 import { InsightCard } from './InsightCard';
 import { TranscriptSelectionToTask } from './SelectionToTask';
+import { TranscriptRow } from './TranscriptRow';
 
 /** Past meetings: a compact list, expanding into the full record (summary,
  *  insights with task kick-off, transcript, reveal-recording). */
@@ -166,20 +167,7 @@ function MeetingDetail({ id, onBack }: { id: string; onBack: () => void }) {
             ? <div style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>No transcript was captured.</div>
             : (
               <TranscriptSelectionToTask meeting={{ id: meta.id, title: meta.title }} style={{ flexDirection: 'column', gap: 6 }}>
-                {transcript.map((s, i) => (
-                  <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, lineHeight: '18px' }}>
-                    <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-500)', flexShrink: 0, paddingTop: 1 }}>
-                      {fmtClock(s.t0)}
-                    </span>
-                    <span style={{
-                      flexShrink: 0, paddingTop: 1, fontFamily: 'var(--cth-font-display)', fontSize: 8,
-                      color: s.source === 'mic' ? 'var(--cth-teal, #14B8A6)' : 'var(--cth-ink-700)'
-                    }}>
-                      {s.source === 'mic' ? 'ME' : 'THEM'}
-                    </span>
-                    <span style={{ color: 'var(--cth-ink-900)' }}>{s.text}</span>
-                  </div>
-                ))}
+                {transcript.map((s, i) => <TranscriptRow key={i} segment={s} />)}
               </TranscriptSelectionToTask>
             )
         )}

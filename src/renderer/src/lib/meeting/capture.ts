@@ -20,6 +20,7 @@
 
 import { PcmSegmenter } from './segmenter';
 import { MeetingTranscriber } from './transcriber';
+import { mtgLog as log, assetBase } from './util';
 
 export interface AudioInputDevice {
   deviceId: string;
@@ -63,7 +64,8 @@ interface EngineState {
   micStream: MediaStream | null;
   systemStream: MediaStream | null;
   displayStream: MediaStream | null;
-  mixCtx: AudioContext;
+  /** Null for a video-only meeting (no audio sources → nothing to mix). */
+  mixCtx: AudioContext | null;
   sttCtx: AudioContext | null;
   recorder: MediaRecorder;
   frameTimer: ReturnType<typeof setInterval> | null;
@@ -80,17 +82,6 @@ interface EngineState {
 }
 
 let state: EngineState | null = null;
-
-function log(level: 'log' | 'error', ...parts: unknown[]): void {
-  (level === 'error' ? console.error : console.log)('[meeting]', ...parts);
-  try { window.cth?.sttLog?.(level, ['[meeting]', ...parts.map((p) => (p instanceof Error ? p.message : p))]); } catch { /* noop */ }
-}
-
-/** Same-origin base the static assets are served from (dev: Vite http URL;
- *  packaged: app://bundle/) — mirrors assetBase() in useDictation. */
-function assetBase(): string {
-  return new URL('.', window.location.href).href;
-}
 
 export function isCapturing(): boolean {
   return state !== null;
@@ -119,8 +110,8 @@ export async function listAudioInputs(): Promise<AudioInputDevice[]> {
 
 export async function startCapture(opts: CaptureOptions): Promise<{ ok: true } | { ok: false; error: string }> {
   if (state) return { ok: false, error: 'a meeting capture is already running' };
-  if (!opts.mic && !opts.systemAudioDeviceId && !(opts.screen && opts.displayLoopback)) {
-    return { ok: false, error: 'pick at least one audio source' };
+  if (!opts.mic && !opts.systemAudioDeviceId && !opts.screen) {
+    return { ok: false, error: 'pick at least one source' };
   }
 
   const acquired: MediaStream[] = [];
@@ -169,28 +160,37 @@ export async function startCapture(opts: CaptureOptions): Promise<{ ok: true } |
       }
     }
 
-    if (!micStream && !systemStream) {
-      releaseAll();
-      return { ok: false, error: 'no audio source available (mic denied and no system audio)' };
-    }
-
-    // ── 2. Mix graph for the recording ──────────────────────────────────────
-    const mixCtx = new AudioContext(); // device rate (typically 48k) — best for opus
-    const dest = mixCtx.createMediaStreamDestination();
-    for (const s of [micStream, systemStream]) {
-      if (!s || s.getAudioTracks().length === 0) continue;
-      const src = mixCtx.createMediaStreamSource(s);
-      const gain = mixCtx.createGain();
-      gain.gain.value = 1.0;
-      src.connect(gain).connect(dest);
-    }
-
     const videoTrack = displayStream?.getVideoTracks()[0] ?? null;
+    const hasAudio = !!(micStream?.getAudioTracks().length || systemStream?.getAudioTracks().length);
+    if (!hasAudio && !videoTrack) {
+      releaseAll();
+      return { ok: false, error: 'no capture source available (mic denied and no system audio/screen)' };
+    }
+
+    // ── 2. Mix graph for the recording (audio sources only; a screen-only
+    //       meeting records video without an audio track or transcription). ──
+    let mixCtx: AudioContext | null = null;
+    const mixedAudioTracks: MediaStreamTrack[] = [];
+    if (hasAudio) {
+      mixCtx = new AudioContext(); // device rate (typically 48k) — best for opus
+      const dest = mixCtx.createMediaStreamDestination();
+      for (const s of [micStream, systemStream]) {
+        if (!s || s.getAudioTracks().length === 0) continue;
+        const src = mixCtx.createMediaStreamSource(s);
+        const gain = mixCtx.createGain();
+        gain.gain.value = 1.0;
+        src.connect(gain).connect(dest);
+      }
+      mixedAudioTracks.push(...dest.stream.getAudioTracks());
+    }
+
     const recStream = new MediaStream([
       ...(videoTrack ? [videoTrack] : []),
-      ...dest.stream.getAudioTracks()
+      ...mixedAudioTracks
     ]);
-    const mimeType = videoTrack ? 'video/webm;codecs=vp8,opus' : 'audio/webm;codecs=opus';
+    const mimeType = videoTrack
+      ? (hasAudio ? 'video/webm;codecs=vp8,opus' : 'video/webm;codecs=vp8')
+      : 'audio/webm;codecs=opus';
     const recorder = new MediaRecorder(recStream, {
       mimeType,
       videoBitsPerSecond: 1_000_000, // ~1 GB per 2h with 5 fps screen video
@@ -218,12 +218,19 @@ export async function startCapture(opts: CaptureOptions): Promise<{ ok: true } |
       if (!state || state.recorder !== recorder || e.data.size === 0) return;
       const st = state;
       st.writeChain = st.writeChain
-        .then(() => e.data.arrayBuffer())
-        .then((buf) => window.cth.meeting.appendChunk(opts.meetingId, buf))
-        .then((res) => { if (!res?.ok) throw new Error(res?.error ?? 'append failed'); })
+        .then(async () => {
+          const buf = await e.data.arrayBuffer();
+          // One retry, then STOP the meeting: silently skipping a chunk corrupts
+          // the webm from that point on (fatally, if it was the header-bearing
+          // first chunk) — an honest stop preserves what's already on disk.
+          let res = await window.cth.meeting.appendChunk(opts.meetingId, buf);
+          if (!res?.ok) res = await window.cth.meeting.appendChunk(opts.meetingId, buf);
+          if (!res?.ok) throw new Error(res?.error ?? 'append failed');
+        })
         .catch((err) => {
-          log('error', 'chunk write failed:', err);
+          log('error', 'chunk write failed (stopping to protect the recording):', err);
           opts.onError?.(`recording write failed: ${err instanceof Error ? err.message : err}`);
+          if (state && !state.stopping) opts.onAutoStop?.('recording write failed — meeting stopped to keep the file playable');
         });
     };
     recorder.onerror = (e) => {
@@ -234,17 +241,19 @@ export async function startCapture(opts: CaptureOptions): Promise<{ ok: true } |
     recorder.start(2000); // 2s timeslice → crash loses at most the last chunk
 
     // ── 3. Live transcription: taps → VAD segmenters → serial Whisper queue ────
-    try {
-      installTranscription(opts);
-      await installPcmTaps(micStream, systemStream);
-    } catch (e) {
-      // Taps failing must not kill the recording — transcription degrades, the
-      // meeting record survives.
-      log('error', 'pcm taps failed (recording continues, no live transcription):', e);
-      opts.onError?.('live transcription unavailable (audio tap failed)');
+    if (hasAudio) {
+      try {
+        installTranscription(opts);
+        await installPcmTaps(micStream, systemStream);
+      } catch (e) {
+        // Taps failing must not kill the recording — transcription degrades, the
+        // meeting record survives.
+        log('error', 'pcm taps failed (recording continues, no live transcription):', e);
+        opts.onError?.('live transcription unavailable (audio tap failed)');
+      }
     }
 
-    // ── 4. Frames + OS-level stop handling ──────────────────────────────────
+    // ── 4. Frames + capture-died handling ───────────────────────────────────
     if (videoTrack) {
       videoTrack.addEventListener('ended', () => {
         // The user hit the browser/OS "stop sharing" UI — treat as meeting stop.
@@ -252,6 +261,21 @@ export async function startCapture(opts: CaptureOptions): Promise<{ ok: true } |
       });
       if (opts.frameCapture) startFrameCapture(displayStream!, opts);
     }
+    // An audio device dying mid-meeting (USB mic unplugged, monitor sink gone)
+    // would otherwise record silence forever without a word of warning: stop the
+    // meeting when the LAST capture source ends, warn when one of several does.
+    const watchAudioEnd = (stream: MediaStream | null, label: string): void => {
+      const track = stream?.getAudioTracks()[0];
+      track?.addEventListener('ended', () => {
+        if (!state || state.stopping) return;
+        const anyLive = [state.micStream, state.systemStream]
+          .some((s) => s?.getAudioTracks().some((t) => t.readyState === 'live'));
+        if (!anyLive && !videoTrack) opts.onAutoStop?.(`${label} disconnected — no capture sources left`);
+        else opts.onError?.(`${label} disconnected — its audio is no longer being captured`);
+      });
+    };
+    watchAudioEnd(micStream, 'microphone');
+    watchAudioEnd(systemStream, 'system audio');
 
     log('log', `capture started for ${opts.meetingId}:`,
       `mic=${!!micStream} system=${!!systemStream} screen=${!!videoTrack} (${mimeType})`);
@@ -290,10 +314,13 @@ export async function stopCapture(): Promise<{ durationSec: number }> {
   for (const s of [st.micStream, st.systemStream, st.displayStream]) {
     if (s) for (const t of s.getTracks()) { try { t.stop(); } catch { /* gone */ } }
   }
-  try { await st.mixCtx.close(); } catch { /* already closed */ }
-  // Closing the stt context stops new PCM; then flush open speech and give the
-  // queue a bounded window to transcribe the meeting's tail.
+  try { await st.mixCtx?.close(); } catch { /* already closed */ }
+  // Closing the stt context stops new PCM at the source, but a few in-flight
+  // worklet port messages can still deliver afterwards — give them a beat to
+  // land in the segmenters BEFORE flushing, so the meeting's last words make
+  // the transcript (flush() also seals each segmenter against later pushes).
   try { await st.sttCtx?.close(); } catch { /* already closed */ }
+  await new Promise((r) => setTimeout(r, 150));
   for (const seg of Object.values(st.segmenters)) { try { seg.flush(); } catch { /* noop */ } }
   if (st.transcriber) {
     await Promise.race([
@@ -326,7 +353,9 @@ function installTranscription(opts: CaptureOptions): void {
         .then((res) => { if (!res?.ok) log('error', 'transcript append failed:', res?.error); })
         .catch((e) => log('error', 'transcript append failed:', e));
     },
-    (depth) => opts.onBacklog?.(depth)
+    (depth) => opts.onBacklog?.(depth),
+    // A wedged/crashed worker kills transcription, never the recording.
+    (msg) => opts.onError?.(`live transcription stopped (${msg}) — recording continues`)
   );
   st.transcriber = transcriber;
   void transcriber.init().catch((e) => {

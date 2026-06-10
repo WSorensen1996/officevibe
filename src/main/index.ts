@@ -1144,10 +1144,17 @@ ipcMain.handle('meeting:read', (_evt, id: unknown) =>
  *  the manager's id regex confines the path to <project>/meetings/<id>. */
 ipcMain.handle('meeting:reveal', (_evt, id: unknown) => {
   if (typeof id !== 'string') return { ok: false, error: 'invalid args' };
-  const read = meetings.read(id);
-  if (!read.ok) return read;
-  shell.showItemInFolder(read.recordingPath ?? meetings.meetingDir(id)!);
+  const dir = meetings.meetingDir(id);
+  if (!dir || !existsSync(dir)) return { ok: false, error: 'unknown meeting' };
+  const recording = join(dir, 'recording.webm');
+  shell.showItemInFolder(existsSync(recording) ? recording : dir);
   return { ok: true };
+});
+/** Force-end a recording orphaned by a renderer reload (the engine died with the
+ *  meeting still active in main — see MeetingManager.abortActive). */
+ipcMain.handle('meeting:abortActive', () => {
+  analysisDriver.detach();
+  return meetings.abortActive();
 });
 /** IPC payloads arrive as Buffer/Uint8Array/ArrayBuffer depending on sender shape;
  *  normalize to a Uint8Array view without copying. */
@@ -1282,6 +1289,9 @@ ipcMain.handle('project:mineNow', () => { memory.mineNow(); return { ok: true };
 function teardownServices(tag: string): void {
   try { clearMissionTimers(); } catch (e) { console.error(`[${tag}] clearMissionTimers:`, e); }
   try { analysisDriver.detach(); } catch (e) { console.error(`[${tag}] analysisDriver.detach:`, e); }
+  // The renderer-side capture dies with the switch/reload; clear the active slot
+  // (and mark the meeting interrupted) or every later start is "already recording".
+  try { meetings.abortActive(); } catch (e) { console.error(`[${tag}] meetings.abortActive:`, e); }
   try { hive.stopRouter(); } catch (e) { console.error(`[${tag}] stopRouter:`, e); }
   try { hookServer.stop(); } catch (e) { console.error(`[${tag}] hookServer.stop:`, e); }
   try { stopSlackServer(); } catch (e) { console.error(`[${tag}] slack.stop:`, e); }
@@ -1635,23 +1645,43 @@ app.whenReady().then(() => {
   // one, every request fails with NotSupportedError. The renderer "arms" a source id
   // first (meeting:setDisplaySource, from our X11 picker modal); we resolve it against
   // the live source list. On Wayland the portal mediates: getSources() pops the OS
-  // picker and returns the single granted source, so the armed id is simply absent and
-  // the fallback to sources[0] picks the portal's choice. System audio rides the same
-  // stream as 'loopback' on Windows (native) and macOS 13+ (feature flag above);
-  // Linux gets system audio from a PulseAudio/PipeWire monitor device via getUserMedia
-  // instead (see lib/meeting/capture.ts), so we never request loopback there.
+  // picker and returns the single granted source, so nothing is armed and sources[0]
+  // IS the portal's choice. System audio rides the same stream as 'loopback' on
+  // Windows (native) and macOS 13+ (feature flag above); Linux gets system audio from
+  // a PulseAudio/PipeWire monitor device via getUserMedia instead (see
+  // lib/meeting/capture.ts), so we never request loopback there.
   session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
-    if (!isOwnOrigin(request.securityOrigin ?? '')) { callback({}); return; }
+    // Exactly-one-callback discipline: Electron's callback is one-shot, and the
+    // documented denial is callback(null) — an empty {} with video requested throws
+    // a TypeError back into this process. (Streams' type doesn't admit null, so cast.)
+    let settled = false;
+    const finish = (streams: Electron.Streams | null): void => {
+      if (settled) return;
+      settled = true;
+      try { callback((streams ?? null) as unknown as Electron.Streams); }
+      catch (e) { console.error('[meeting] display-media callback failed:', e); }
+    };
+    if (!isOwnOrigin(request.securityOrigin ?? '')) { finish(null); return; }
+    const armed = armedDisplaySourceId;
+    armedDisplaySourceId = null; // one-shot: never silently reuse a stale pick
     const wantLoopback = request.audioRequested && process.platform !== 'linux';
     desktopCapturer.getSources({ types: ['screen', 'window'] }).then((sources) => {
-      const source = (armedDisplaySourceId && sources.find((s) => s.id === armedDisplaySourceId)) || sources[0];
-      armedDisplaySourceId = null; // one-shot: never silently reuse a stale pick
-      if (!source) { callback({}); return; }
+      // An armed pick that no longer resolves (window closed between pick and
+      // start) is a DENIAL, never a fallback — silently recording the whole
+      // primary screen instead of the window the user chose would leak whatever
+      // else is on their desktop. sources[0] applies only when nothing was armed
+      // (Wayland portal / win+mac primary-screen default).
+      const source = armed ? sources.find((s) => s.id === armed) : sources[0];
+      if (!source) {
+        console.warn('[meeting] display-media request denied:', armed ? `armed source ${armed} vanished` : 'no sources');
+        finish(null);
+        return;
+      }
       console.log('[meeting] display-media request → granting', source.id, source.name, wantLoopback ? '+loopback' : '');
-      callback({ video: source, audio: wantLoopback ? 'loopback' : undefined });
+      finish({ video: source, audio: wantLoopback ? 'loopback' : undefined });
     }).catch((e) => {
       console.error('[meeting] display-media getSources failed:', e);
-      callback({});
+      finish(null);
     });
   });
 
