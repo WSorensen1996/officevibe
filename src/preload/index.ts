@@ -203,12 +203,32 @@ export interface HarnessConfig {
   defaultEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   semanticMemory: boolean;
   embeddingModel: 'minilm' | 'embeddinggemma';
-  sttModel: 'whisper-base.en' | 'whisper-tiny.en' | 'distil-small.en';
+  sttModel: 'whisper-base.en' | 'whisper-tiny.en' | 'whisper-base' | 'distil-small.en';
+  /** Whisper model for live meeting transcription (CPU-only worker; see main config.ts). */
+  meetingSttModel?: 'whisper-base' | 'whisper-base.en' | 'whisper-tiny.en';
+  /** Meeting language: 'auto' detects per segment; a fixed code improves accuracy. */
+  meetingLanguage?: 'auto' | 'en' | 'da';
+  /** Seconds between meeting-analyst ticks. */
+  meetingAnalysisIntervalSec?: number;
+  /** Capture periodic screen frames for the analyst. */
+  meetingFrameCapture?: boolean;
+  /** Seconds between captured screen frames. */
+  meetingFrameIntervalSec?: number;
+  /** Model for the meeting-analyst agent; unset = defaultModel. */
+  analystModel?: string;
   /** Auto-approve tasks entering Needs Approval (see main config.ts). */
   autoApprove?: boolean;
   missions?: ScheduledMission[];
   notifications?: boolean;
   mcpServers?: McpServerDef[];
+}
+
+/** One OS screen/window available for meeting capture (X11 picker modal). */
+export interface ScreenSource {
+  id: string;
+  name: string;
+  /** PNG data URL thumbnail (empty on platforms that don't provide one). */
+  thumbnail: string;
 }
 
 export interface MemoryStatus {
@@ -551,6 +571,16 @@ const api = {
   /** Run a curator cycle now (promote proposals + lifecycle + budget-gated consolidation). */
   knowledgeCurateNow: (): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('knowledge:curateNow'),
+
+  // ─── Meetings (recording + live transcription + analyst) ─────────────────────
+  meeting: {
+    /** Screens/windows available for capture (X11 picker; Wayland uses the OS portal). */
+    listScreenSources: (): Promise<{ ok: boolean; sources?: ScreenSource[]; error?: string }> =>
+      ipcRenderer.invoke('meeting:listScreenSources'),
+    /** Arm the picked source id; the next getDisplayMedia resolves to it (one-shot). */
+    setDisplaySource: (id: string | null): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('meeting:setDisplaySource', id)
+  },
 
   // ─── Embedded browser pane (god-driven native WebContentsView, bottom-left) ──
   browser: {

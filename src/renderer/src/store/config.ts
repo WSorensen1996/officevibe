@@ -45,7 +45,19 @@ export interface HarnessConfig {
   defaultEffort?: EffortLevel;
   semanticMemory: boolean;
   embeddingModel: 'minilm' | 'embeddinggemma';
-  sttModel: 'whisper-base.en' | 'whisper-tiny.en' | 'distil-small.en';
+  sttModel: 'whisper-base.en' | 'whisper-tiny.en' | 'whisper-base' | 'distil-small.en';
+  /** Whisper model for live meeting transcription (CPU-only worker; see main config.ts). */
+  meetingSttModel?: 'whisper-base' | 'whisper-base.en' | 'whisper-tiny.en';
+  /** Meeting language: 'auto' detects per segment; a fixed code improves accuracy. */
+  meetingLanguage?: 'auto' | 'en' | 'da';
+  /** Seconds between meeting-analyst ticks. */
+  meetingAnalysisIntervalSec?: number;
+  /** Capture periodic screen frames for the analyst. */
+  meetingFrameCapture?: boolean;
+  /** Seconds between captured screen frames. */
+  meetingFrameIntervalSec?: number;
+  /** Model for the meeting-analyst agent; unset = defaultModel. */
+  analystModel?: string;
   /** When true, a task entering Needs Approval is auto-approved (returned to TODO +
    *  dispatched, planMode cleared) without a human Approve click. Persisted. */
   autoApprove?: boolean;

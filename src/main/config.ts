@@ -104,9 +104,25 @@ export interface HarnessConfig {
   /** Skip the curator's LLM consolidation when 5h or 7d Claude usage exceeds this percent. */
   curatorUsageCeilingPercent?: number;
   /** Whisper dictation model: accurate 'whisper-base.en' (default), lighter/faster
-   *  'whisper-tiny.en', or the GPU tier 'distil-small.en' (WebGPU, CPU fallback). The
-   *  string is the on-disk model folder name the STT worker loads. */
-  sttModel: 'whisper-base.en' | 'whisper-tiny.en' | 'distil-small.en';
+   *  'whisper-tiny.en', multilingual 'whisper-base' (90+ languages, incl. Danish), or
+   *  the GPU tier 'distil-small.en' (WebGPU, CPU fallback). The string is the on-disk
+   *  model folder name the STT worker loads. */
+  sttModel: 'whisper-base.en' | 'whisper-tiny.en' | 'whisper-base' | 'distil-small.en';
+  /** Whisper model for live MEETING transcription (always CPU/WASM in its own worker
+   *  so it never contends with the office floor's GPU). Defaults to the multilingual
+   *  'whisper-base' so Danish/English meetings work out of the box. */
+  meetingSttModel?: 'whisper-base' | 'whisper-base.en' | 'whisper-tiny.en';
+  /** Spoken language of meetings: 'auto' lets Whisper detect per segment; a fixed
+   *  code ('en'/'da') improves accuracy when meetings are single-language. */
+  meetingLanguage?: 'auto' | 'en' | 'da';
+  /** Seconds between meeting-analyst ticks (transcript delta + frames → analyst inbox). */
+  meetingAnalysisIntervalSec?: number;
+  /** Capture periodic screen frames during meetings for the analyst to Read. */
+  meetingFrameCapture?: boolean;
+  /** Seconds between captured screen frames (when meetingFrameCapture is on). */
+  meetingFrameIntervalSec?: number;
+  /** Model for the meeting-analyst agent (e.g. 'claude-sonnet-4-6'); unset = defaultModel. */
+  analystModel?: string;
   /** When true, any task that ENTERS the Needs Approval sub-section is immediately
    *  auto-approved (returned to TODO + dispatched, planMode cleared) without waiting
    *  for a human Approve click. Persisted so it survives restart. Default false. */
@@ -154,6 +170,11 @@ const DEFAULTS: HarnessConfig = {
   curatorBackupKeep: 5,
   curatorUsageCeilingPercent: 80,
   sttModel: 'whisper-base.en',
+  meetingSttModel: 'whisper-base',
+  meetingLanguage: 'auto',
+  meetingAnalysisIntervalSec: 60,
+  meetingFrameCapture: true,
+  meetingFrameIntervalSec: 15,
   autoApprove: false,
   missions: [],
   notifications: false,

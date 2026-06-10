@@ -1,4 +1,4 @@
-import { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, shell, protocol, session } from 'electron';
+import { app, BrowserWindow, WebContentsView, clipboard, desktopCapturer, dialog, ipcMain, shell, protocol, session } from 'electron';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { rmSync, existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync } from 'node:fs';
@@ -76,6 +76,16 @@ if (process.platform === 'linux') {
   // escalating to a process kill. Linux/Vulkan only, where the contention occurs.
   app.commandLine.appendSwitch('disable-gpu-watchdog');
 }
+if (process.platform === 'darwin') {
+  // System-audio loopback for meeting recording: on macOS 13+ Chromium can tap
+  // desktop audio via ScreenCaptureKit, but the feature is flag-gated until
+  // Electron 39. Enables the `audio: 'loopback'` option in the display-media
+  // handler below (Windows has it natively; Linux uses PulseAudio monitor devices
+  // instead — see lib/meeting/capture.ts).
+  // NB: appendSwitch REPLACES any prior value for the same key — if this branch
+  // ever merges with the Linux 'enable-features' above, comma-join the values.
+  app.commandLine.appendSwitch('enable-features', 'MacLoopbackAudioForScreenShare');
+}
 
 /** Content-Type for a file served over the app:// protocol. */
 function mimeForPath(p: string): string {
@@ -93,6 +103,7 @@ function mimeForPath(p: string): string {
     case '.jpeg': return 'image/jpeg';
     case '.gif': return 'image/gif';
     case '.webp': return 'image/webp';
+    case '.webm': return 'video/webm';
     case '.woff': return 'font/woff';
     case '.woff2': return 'font/woff2';
     case '.ttf': return 'font/ttf';
@@ -944,7 +955,9 @@ const CONFIG_KEYS: ReadonlySet<string> = new Set([
   'semanticMemory', 'embeddingModel', 'skillLearning', 'curatorIntervalMinutes',
   'skillStaleAfterDays', 'skillArchiveAfterDays', 'maxInjectedSkills', 'skillInventoryTokenBudget',
   'curatorBackupKeep', 'curatorUsageCeilingPercent', 'sttModel', 'autoApprove', 'missions',
-  'notifications', 'slackEnabled', 'slackChannelId', 'slackPort', 'mcpServers'
+  'notifications', 'slackEnabled', 'slackChannelId', 'slackPort', 'mcpServers',
+  'meetingSttModel', 'meetingLanguage', 'meetingAnalysisIntervalSec',
+  'meetingFrameCapture', 'meetingFrameIntervalSec', 'analystModel'
   // NB: slackSigningSecret is intentionally NOT here — it is set only via the
   // dedicated slack:setConfig handler (which seals it), never the generic update.
 ]);
@@ -1038,6 +1051,33 @@ ipcMain.handle('attachment:read', (_evt, rel: unknown) => {
   const root = readConfig().activeProjectPath;
   if (!root) return { ok: false, error: 'no active project' };
   return readFileBinary(root, rel);
+});
+
+// ─── IPC: meeting screen capture (display-media source selection) ────────────
+/** Source id the renderer picked in the X11 screen-picker modal; consumed (one-shot)
+ *  by the setDisplayMediaRequestHandler in whenReady when getDisplayMedia fires. */
+let armedDisplaySourceId: string | null = null;
+ipcMain.handle('meeting:listScreenSources', async () => {
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 320, height: 200 }
+    });
+    return {
+      ok: true,
+      sources: sources.map((s) => ({
+        id: s.id,
+        name: s.name,
+        thumbnail: s.thumbnail?.toDataURL() ?? ''
+      }))
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+});
+ipcMain.handle('meeting:setDisplaySource', (_evt, id: unknown) => {
+  armedDisplaySourceId = typeof id === 'string' && id ? id : null;
+  return { ok: true };
 });
 
 // ─── IPC: project store (multi-agent coordination) ──────────────────────────
@@ -1486,22 +1526,52 @@ app.whenReady().then(() => {
     (level === 'error' ? console.error : console.log)('[stt]', ...args);
   });
 
-  // Allow microphone capture for the dictation feature — but only for our OWN UI
-  // (app:// in prod, the Vite localhost URL in dev), never the embedded web browser
-  // pane, which can navigate to arbitrary sites.
+  // Allow microphone capture (dictation/meetings) and screen capture (meeting
+  // recording) — but only for our OWN UI (app:// in prod, the Vite localhost URL in
+  // dev), never the embedded web browser pane, which can navigate to arbitrary sites.
   const isOwnOrigin = (s: string): boolean =>
     s.startsWith('app://') || s.startsWith('http://localhost') || s.startsWith('http://127.0.0.1');
   session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => {
     const url = wc?.getURL?.() ?? '';
     const allow = isOwnOrigin(url);
-    if (permission === 'media') console.log('[stt] permission request:', permission, 'from', url, '→', allow);
+    if (permission === 'media' || permission === 'display-capture') {
+      console.log('[stt] permission request:', permission, 'from', url, '→', allow);
+    }
     callback(allow);
   });
   // Some getUserMedia/enumerateDevices flows consult the synchronous check handler.
+  // (Its `permission` union is narrower than the request handler's — 'display-capture'
+  // arrives only via the request handler — so compare as plain strings for the log.)
   session.defaultSession.setPermissionCheckHandler((_wc, permission, requestingOrigin) => {
     const allow = isOwnOrigin(requestingOrigin ?? '');
-    if (permission === 'media') console.log('[stt] permission check:', permission, 'from', requestingOrigin, '→', allow);
+    if ((permission as string) === 'media' || (permission as string) === 'display-capture') {
+      console.log('[stt] permission check:', permission, 'from', requestingOrigin, '→', allow);
+    }
     return allow;
+  });
+
+  // getDisplayMedia (meeting screen recording) routes through this handler — without
+  // one, every request fails with NotSupportedError. The renderer "arms" a source id
+  // first (meeting:setDisplaySource, from our X11 picker modal); we resolve it against
+  // the live source list. On Wayland the portal mediates: getSources() pops the OS
+  // picker and returns the single granted source, so the armed id is simply absent and
+  // the fallback to sources[0] picks the portal's choice. System audio rides the same
+  // stream as 'loopback' on Windows (native) and macOS 13+ (feature flag above);
+  // Linux gets system audio from a PulseAudio/PipeWire monitor device via getUserMedia
+  // instead (see lib/meeting/capture.ts), so we never request loopback there.
+  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+    if (!isOwnOrigin(request.securityOrigin ?? '')) { callback({}); return; }
+    const wantLoopback = request.audioRequested && process.platform !== 'linux';
+    desktopCapturer.getSources({ types: ['screen', 'window'] }).then((sources) => {
+      const source = (armedDisplaySourceId && sources.find((s) => s.id === armedDisplaySourceId)) || sources[0];
+      armedDisplaySourceId = null; // one-shot: never silently reuse a stale pick
+      if (!source) { callback({}); return; }
+      console.log('[meeting] display-media request → granting', source.id, source.name, wantLoopback ? '+loopback' : '');
+      callback({ video: source, audio: wantLoopback ? 'loopback' : undefined });
+    }).catch((e) => {
+      console.error('[meeting] display-media getSources failed:', e);
+      callback({});
+    });
   });
 
   // Persist the project migration once: a pre-"project" config derives its

@@ -31,6 +31,10 @@ const ROOT = resolve(__dirname, '..');
 const MODELS = [
   { id: 'whisper-base.en', repo: 'onnx-community/whisper-base.en' },
   { id: 'whisper-tiny.en', repo: 'onnx-community/whisper-tiny.en' },
+  // Multilingual tier (q8/CPU): same architecture as base.en but trained on 90+
+  // languages (the meetings feature defaults to it for Danish/English mixes). Needs
+  // the `language` generate option at transcribe time — see transcriber.worker.ts.
+  { id: 'whisper-base', repo: 'onnx-community/whisper-base' },
   {
     id: 'distil-small.en',
     repo: 'onnx-community/distil-small.en',

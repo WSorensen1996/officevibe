@@ -17,7 +17,23 @@ type SttModelId = HarnessConfig['sttModel'];
 const STT_MODELS: { id: SttModelId; title: string; detail: string }[] = [
   { id: 'whisper-base.en', title: 'Standard', detail: 'More accurate · ~78 MB' },
   { id: 'whisper-tiny.en', title: 'Fast', detail: 'Quicker · ~44 MB, lower accuracy' },
+  { id: 'whisper-base', title: 'Multilingual', detail: 'Danish, English + 90 more · ~80 MB' },
   { id: 'distil-small.en', title: 'High accuracy (GPU)', detail: 'Best accuracy · runs on GPU · ~538 MB (CPU fallback)' }
+];
+
+/** Meeting transcription model choices (always CPU/WASM in the meeting worker). */
+type MeetingSttModelId = NonNullable<HarnessConfig['meetingSttModel']>;
+const MEETING_STT_MODELS: { id: MeetingSttModelId; title: string; detail: string }[] = [
+  { id: 'whisper-base', title: 'Multilingual', detail: 'Danish, English + 90 more · ~80 MB' },
+  { id: 'whisper-base.en', title: 'English', detail: 'English-only, slightly more accurate' },
+  { id: 'whisper-tiny.en', title: 'English fast', detail: 'Lightest CPU load, lower accuracy' }
+];
+
+type MeetingLanguage = NonNullable<HarnessConfig['meetingLanguage']>;
+const MEETING_LANGUAGES: { id: MeetingLanguage; label: string }[] = [
+  { id: 'auto', label: 'Auto-detect' },
+  { id: 'da', label: 'Dansk' },
+  { id: 'en', label: 'English' }
 ];
 
 /** Human-readable label for the backend the dictation worker actually loaded on —
@@ -176,6 +192,38 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
     setSttModel(next); // optimistic
     try { await window.cth.updateConfig({ sttModel: next }); }
     catch { setSttModel(prev); /* revert on failure */ }
+  };
+
+  // ─── Meetings (live transcription + analyst) ────────────────────────────────
+  // Optimistic local state with revert-on-failure, mirroring the toggles above.
+  const [meetingSttModel, setMeetingSttModel] = useState<MeetingSttModelId>(config.meetingSttModel ?? 'whisper-base');
+  const pickMeetingSttModel = async (next: MeetingSttModelId) => {
+    if (next === meetingSttModel) return;
+    const prev = meetingSttModel;
+    setMeetingSttModel(next);
+    try { await window.cth.updateConfig({ meetingSttModel: next }); }
+    catch { setMeetingSttModel(prev); }
+  };
+  const [meetingLanguage, setMeetingLanguage] = useState<MeetingLanguage>(config.meetingLanguage ?? 'auto');
+  const pickMeetingLanguage = async (next: MeetingLanguage) => {
+    if (next === meetingLanguage) return;
+    const prev = meetingLanguage;
+    setMeetingLanguage(next);
+    try { await window.cth.updateConfig({ meetingLanguage: next }); }
+    catch { setMeetingLanguage(prev); }
+  };
+  const [meetingFrames, setMeetingFrames] = useState<boolean>(config.meetingFrameCapture !== false);
+  const toggleMeetingFrames = async () => {
+    const next = !meetingFrames;
+    setMeetingFrames(next);
+    try { await window.cth.updateConfig({ meetingFrameCapture: next }); }
+    catch { setMeetingFrames(!next); }
+  };
+  const [analysisInterval, setAnalysisInterval] = useState<string>(String(config.meetingAnalysisIntervalSec ?? 60));
+  const saveAnalysisInterval = async () => {
+    const n = Math.max(15, Math.min(600, Number(analysisInterval) || 60));
+    setAnalysisInterval(String(n));
+    try { await window.cth.updateConfig({ meetingAnalysisIntervalSec: n }); } catch { /* keep local */ }
   };
 
   // ─── Default effort level for new agents ───────────────────────────────────
@@ -400,6 +448,92 @@ function SettingsBody({ config }: { config: HarnessConfig }) {
               );
             })}
           </div>
+        </div>
+      </Section>
+
+      <Section title="MEETINGS">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+            Live meeting transcription + the meeting analyst. Transcription runs fully
+            offline on the CPU; settings take effect on the next meeting you start.
+          </div>
+          <div>
+            <div style={{ ...labelStyle, marginBottom: 4 }}>Transcription model</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {MEETING_STT_MODELS.map((m) => {
+                const sel = meetingSttModel === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => pickMeetingSttModel(m.id)}
+                    style={{
+                      flex: 1, textAlign: 'left', cursor: 'pointer', border: 'none',
+                      padding: '7px 9px 6px',
+                      background: sel ? 'var(--cth-lemon-light)' : 'var(--cth-cream-100)',
+                      boxShadow: sel ? 'inset 0 0 0 2px var(--cth-ink-900)' : 'inset 0 0 0 1px var(--cth-ink-300)',
+                      fontFamily: 'var(--cth-font-ui)'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 13, color: 'var(--cth-ink-900)' }}>
+                      <span style={{
+                        width: 8, height: 8, flexShrink: 0,
+                        background: sel ? 'var(--cth-ink-900)' : 'transparent',
+                        boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)'
+                      }} />
+                      {m.title}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: 3 }}>{m.detail}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div>
+            <div style={{ ...labelStyle, marginBottom: 4 }}>Meeting language</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {MEETING_LANGUAGES.map((l) => {
+                const sel = meetingLanguage === l.id;
+                return (
+                  <button
+                    key={l.id}
+                    onClick={() => pickMeetingLanguage(l.id)}
+                    style={{
+                      padding: '5px 10px 4px', cursor: 'pointer', border: 'none',
+                      background: sel ? 'var(--cth-lemon-light)' : 'var(--cth-cream-100)',
+                      boxShadow: sel ? 'inset 0 0 0 2px var(--cth-ink-900)' : 'inset 0 0 0 1px var(--cth-ink-300)',
+                      fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-900)'
+                    }}
+                  >
+                    {l.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: 4 }}>
+              Pinning a language improves accuracy on the multilingual model; the English models ignore it.
+            </div>
+          </div>
+          <ToggleRow
+            title="Screen frames for the analyst"
+            caption="Capture a screenshot of the shared screen every ~15s so the analyst can see what's presented."
+            on={meetingFrames}
+            onToggle={toggleMeetingFrames}
+          />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={labelStyle}>Analysis tick (seconds)</span>
+            <input
+              type="number"
+              value={analysisInterval}
+              onChange={(e) => setAnalysisInterval(e.target.value)}
+              onBlur={saveAnalysisInterval}
+              min={15}
+              max={600}
+              style={{ ...inputStyle, width: 92, fontFamily: 'var(--cth-font-mono)' }}
+            />
+            <span style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
+              How often the analyst receives new transcript + frames (15–600s).
+            </span>
+          </label>
         </div>
       </Section>
 

@@ -46,7 +46,11 @@ function log(level: 'log' | 'error', ...parts: unknown[]): void {
 // resolution error for @huggingface/transformers) — the hook's w.onerror will fire.
 log('log', 'module loaded');
 
-let transcriberPromise: Promise<(audio: Float32Array) => Promise<unknown>> | null = null;
+/** Whisper generate options we forward per-request. `language` only has an effect on
+ *  multilingual models (e.g. whisper-base); the .en models ignore it. */
+type TranscribeOpts = { language?: string; task?: string };
+
+let transcriberPromise: Promise<(audio: Float32Array, opts?: TranscribeOpts) => Promise<unknown>> | null = null;
 
 function configure(base: string): void {
   // Fully offline: every request resolves to the app's OWN origin (localhost in dev,
@@ -88,7 +92,7 @@ function getTranscriber() {
         session_options?: { graphOptimizationLevel?: string };
         progress_callback?: (p: unknown) => void;
       }
-    ) => Promise<(audio: Float32Array) => Promise<unknown>>)(
+    ) => Promise<(audio: Float32Array, opts?: TranscribeOpts) => Promise<unknown>>)(
       'automatic-speech-recognition',
       modelId,
       {
@@ -127,7 +131,7 @@ function fallbackToCpu(): void {
 ctx.onmessage = async (e: MessageEvent) => {
   const msg = e.data as
     | { type: 'init'; base: string; model?: string; device?: 'webgpu' | 'wasm' }
-    | { type: 'transcribe'; id: number; pcm: Float32Array };
+    | { type: 'transcribe'; id: number; pcm: Float32Array; opts?: TranscribeOpts };
   try {
     if (msg.type === 'init') {
       if (msg.model) modelId = msg.model;
@@ -148,11 +152,16 @@ ctx.onmessage = async (e: MessageEvent) => {
       log('log', `model ready on ${device}`);
       ctx.postMessage({ type: 'ready', device });
     } else if (msg.type === 'transcribe') {
-      log('log', `transcribe start: ${msg.pcm.length} samples (~${(msg.pcm.length / 16000).toFixed(1)}s)`);
+      log('log', `transcribe start: ${msg.pcm.length} samples (~${(msg.pcm.length / 16000).toFixed(1)}s)`,
+        msg.opts?.language ? `language=${msg.opts.language}` : '');
+      // Only forward generate options when a language is pinned: the .en models
+      // reject/ignore them, and `language` on a multilingual model with no value
+      // means auto-detect anyway.
+      const genOpts = msg.opts?.language ? { language: msg.opts.language, task: msg.opts.task ?? 'transcribe' } : undefined;
       let out: { text?: string } | Array<{ text?: string }>;
       try {
         const transcriber = await getTranscriber();
-        out = (await transcriber(msg.pcm)) as { text?: string } | Array<{ text?: string }>;
+        out = (await transcriber(msg.pcm, genOpts)) as { text?: string } | Array<{ text?: string }>;
       } catch (txErr) {
         // A WebGPU failure DURING transcription (e.g. the shared GPU process is recycled
         // after a swapchain hang) must never lose the user's audio. Drop the dead GPU
@@ -168,7 +177,7 @@ ctx.onmessage = async (e: MessageEvent) => {
         fallbackToCpu();
         ctx.postMessage({ type: 'backend-changed', device });
         const cpu = await getTranscriber();
-        out = (await cpu(msg.pcm)) as { text?: string } | Array<{ text?: string }>;
+        out = (await cpu(msg.pcm, genOpts)) as { text?: string } | Array<{ text?: string }>;
       }
       log('log', 'transcribe raw output', out);
       const text = Array.isArray(out)
