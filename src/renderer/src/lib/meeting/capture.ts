@@ -18,6 +18,9 @@
 // display-media handler). The 16 kHz stt context makes Chromium do the
 // resampling natively — no OfflineAudioContext per segment.
 
+import { PcmSegmenter } from './segmenter';
+import { MeetingTranscriber } from './transcriber';
+
 export interface AudioInputDevice {
   deviceId: string;
   label: string;
@@ -26,11 +29,11 @@ export interface AudioInputDevice {
 }
 
 export interface CaptureCallbacks {
-  /** Batched 16 kHz mono PCM from one source (~128 ms per call). Phase 2 feeds the
-   *  VAD segmenter from here. The buffer is transferred — consume synchronously. */
-  onPcm?: (source: 'mic' | 'system', pcm: Float32Array) => void;
   /** Throttled RMS level per source (0..~1), for the setup/live meters. */
   onLevel?: (source: 'mic' | 'system', rms: number) => void;
+  /** Depth of the speech-segment queue awaiting transcription — the UI's
+   *  "transcription lagging" signal. */
+  onBacklog?: (depth: number) => void;
   /** Capture ended outside the Stop button (user hit the OS "stop sharing" bar,
    *  device unplugged). The store turns this into a graceful meeting stop. */
   onAutoStop?: (reason: string) => void;
@@ -48,6 +51,10 @@ export interface CaptureOptions extends CaptureCallbacks {
   displayLoopback: boolean;
   frameCapture: boolean;
   frameIntervalSec: number;
+  /** Whisper model folder for the meeting worker (always CPU/WASM). */
+  sttModel: string;
+  /** 'auto' | 'en' | 'da' — pins Whisper's language on multilingual models. */
+  language: string;
 }
 
 interface EngineState {
@@ -65,6 +72,9 @@ interface EngineState {
   /** Serialized chunk writes — ondataavailable → arrayBuffer() is async, so without
    *  a chain two chunks could land on disk out of order and corrupt the webm. */
   writeChain: Promise<void>;
+  /** Live transcription: per-source VAD segmenters feeding one serial Whisper queue. */
+  segmenters: Partial<Record<'mic' | 'system', PcmSegmenter>>;
+  transcriber: MeetingTranscriber | null;
   stopping: boolean;
   opts: CaptureOptions;
 }
@@ -198,6 +208,8 @@ export async function startCapture(opts: CaptureOptions): Promise<{ ok: true } |
       frameVideo: null,
       frameCanvas: null,
       writeChain: Promise.resolve(),
+      segmenters: {},
+      transcriber: null,
       stopping: false,
       opts
     };
@@ -221,8 +233,9 @@ export async function startCapture(opts: CaptureOptions): Promise<{ ok: true } |
     };
     recorder.start(2000); // 2s timeslice → crash loses at most the last chunk
 
-    // ── 3. 16 kHz PCM taps (levels now, transcription in the segmenter wiring) ──
+    // ── 3. Live transcription: taps → VAD segmenters → serial Whisper queue ────
     try {
+      installTranscription(opts);
       await installPcmTaps(micStream, systemStream);
     } catch (e) {
       // Taps failing must not kill the recording — transcription degrades, the
@@ -252,9 +265,10 @@ export async function startCapture(opts: CaptureOptions): Promise<{ ok: true } |
   }
 }
 
-/** Stop everything, flush the recorder's final chunk to disk, release devices.
- *  Resolves once the last chunk write has settled — callers can then finalize
- *  metadata knowing recording.webm is complete. */
+/** Stop everything, flush the recorder's final chunk to disk, transcribe the
+ *  speech tail (bounded), release devices. Resolves once the last chunk write
+ *  has settled — callers can then finalize metadata knowing recording.webm is
+ *  complete. */
 export async function stopCapture(): Promise<{ durationSec: number }> {
   const st = state;
   if (!st) return { durationSec: 0 };
@@ -277,7 +291,17 @@ export async function stopCapture(): Promise<{ durationSec: number }> {
     if (s) for (const t of s.getTracks()) { try { t.stop(); } catch { /* gone */ } }
   }
   try { await st.mixCtx.close(); } catch { /* already closed */ }
+  // Closing the stt context stops new PCM; then flush open speech and give the
+  // queue a bounded window to transcribe the meeting's tail.
   try { await st.sttCtx?.close(); } catch { /* already closed */ }
+  for (const seg of Object.values(st.segmenters)) { try { seg.flush(); } catch { /* noop */ } }
+  if (st.transcriber) {
+    await Promise.race([
+      st.transcriber.drain(),
+      new Promise((r) => setTimeout(r, 20_000))
+    ]);
+    st.transcriber.dispose();
+  }
 
   const durationSec = (performance.now() - st.startedAtMs) / 1000;
   state = null;
@@ -286,6 +310,33 @@ export async function stopCapture(): Promise<{ durationSec: number }> {
 }
 
 // ─── internals ────────────────────────────────────────────────────────────────
+
+/** Build the live-transcription chain: one Whisper worker (warmed in the
+ *  background — first segments queue while the model loads) and a VAD segmenter
+ *  per source. Transcribed segments go straight to the meeting record over IPC;
+ *  the main process echoes them back as the renderer's live feed event. */
+function installTranscription(opts: CaptureOptions): void {
+  const st = state;
+  if (!st) return;
+  const transcriber = new MeetingTranscriber(
+    opts.sttModel,
+    opts.language,
+    (seg) => {
+      void window.cth.meeting.appendTranscript(opts.meetingId, [seg])
+        .then((res) => { if (!res?.ok) log('error', 'transcript append failed:', res?.error); })
+        .catch((e) => log('error', 'transcript append failed:', e));
+    },
+    (depth) => opts.onBacklog?.(depth)
+  );
+  st.transcriber = transcriber;
+  void transcriber.init().catch((e) => {
+    log('error', 'meeting model failed to load (recording continues):', e);
+    opts.onError?.(`live transcription unavailable: ${e instanceof Error ? e.message : e}`);
+  });
+  for (const source of ['mic', 'system'] as const) {
+    st.segmenters[source] = new PcmSegmenter((seg) => transcriber.enqueue(source, seg));
+  }
+}
 
 /** Attach a pcm-tap worklet per audio source inside a dedicated 16 kHz context
  *  (Chromium resamples MediaStreamSource input to the context rate natively).
@@ -322,7 +373,9 @@ async function installPcmTaps(micStream: MediaStream | null, systemStream: Media
         for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
         cur.opts.onLevel(name, Math.sqrt(sum / pcm.length));
       }
-      cur.opts.onPcm?.(name, pcm);
+      // The segmenter copies what it keeps, so handing it the transferred batch
+      // synchronously is safe.
+      cur.segmenters[name]?.push(pcm);
     };
   }
 }

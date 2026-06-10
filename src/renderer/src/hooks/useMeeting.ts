@@ -125,7 +125,10 @@ export const useMeetingStore = create<MeetingStore>((set, get) => ({
         displayLoopback,
         frameCapture: cfg.meetingFrameCapture !== false,
         frameIntervalSec: cfg.meetingFrameIntervalSec ?? 15,
+        sttModel: cfg.meetingSttModel ?? 'whisper-base',
+        language: cfg.meetingLanguage ?? 'auto',
         onLevel: (source, rms) => set({ levels: { ...get().levels, [source]: rms } }),
+        onBacklog: (depth) => set({ sttBacklog: depth }),
         onAutoStop: (reason) => { void get().stop(reason); },
         onError: (message) => set({ error: message })
       });
