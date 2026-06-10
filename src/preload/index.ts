@@ -654,6 +654,9 @@ const api = {
       ipcRenderer.invoke('meeting:stop', id, durationSec),
     list: (): Promise<MeetingMeta[]> => ipcRenderer.invoke('meeting:list'),
     read: (id: string): Promise<MeetingReadResult> => ipcRenderer.invoke('meeting:read', id),
+    /** Show the recording (or meeting folder) in the OS file manager. */
+    reveal: (id: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('meeting:reveal', id),
     /** New transcript segments just persisted — drives the live transcript feed. */
     onTranscript: (cb: (e: { meetingId: string; segments: TranscriptSegment[] }) => void): (() => void) => {
       const listener = (_e: IpcRendererEvent, payload: { meetingId: string; segments: TranscriptSegment[] }) => cb(payload);

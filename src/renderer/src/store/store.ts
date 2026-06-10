@@ -117,6 +117,9 @@ export const NEW_TASK_ID = '__new__';
 /** A prefill handed to the CREATE-mode task form — e.g. when a user turns a
  *  selected sentence from a finished task's result into a new task. */
 export interface NewTaskSeed {
+  /** Title prefill — used by meeting-insight "create task" (the analyst's
+   *  suggestedTask.title). */
+  title?: string;
   description?: string;
   /** Source text carried as the new task's `reference` (NOT prefilled into the
    *  visible description) — e.g. the selected sentence a "new task from selection"

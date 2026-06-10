@@ -1,16 +1,20 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMeeting } from '@/hooks/useMeeting';
 import { fmtClock } from '@/lib/meeting/types';
 import { PixelPanel } from '../PixelPanel';
 import { PixelButton } from '../PixelButton';
 import { Select } from '../Select';
 import { Icon } from '../Icon';
+import { ScreenSourcePicker } from './ScreenSourcePicker';
+import { MeetingHistory } from './MeetingHistory';
+import { InsightCard } from './InsightCard';
 
 /**
- * The MEETING left-tab view. Three states:
- *   setup     — pick sources (mic / system-audio monitor device / screen) + title
- *   recording — live transcript feed, elapsed clock, level meters, stop
- *   (history & insights land in later phases)
+ * The MEETING left-tab view. Two modes:
+ *   setup + history — pick sources (mic / system-audio monitor device / screen),
+ *                     start; past meetings listed below
+ *   live            — transcript + analyst insights side by side, REC clock,
+ *                     level meters, stop
  * The capture engine is module-scoped, so navigating away never interrupts a
  * recording — this component is just the dashboard.
  */
@@ -37,9 +41,24 @@ function SetupView() {
   const monitors = useMemo(() => m.devices.filter((d) => d.isMonitor), [m.devices]);
   const platform = window.cth.platform;
   const linux = platform.os === 'linux';
+  // X11 needs OUR source picker before getDisplayMedia; Wayland's portal and
+  // win/mac's handler-default (primary screen) don't.
+  const needsPicker = linux && !platform.wayland;
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const begin = (): void => {
+    if (m.setup.screenOn && needsPicker) setPickerOpen(true);
+    else void m.start();
+  };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' }}>
+    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' }}>
+      {pickerOpen && (
+        <ScreenSourcePicker
+          onPicked={() => { setPickerOpen(false); void m.start(); }}
+          onCancel={() => setPickerOpen(false)}
+        />
+      )}
       <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-700)' }}>
         START A MEETING
       </div>
@@ -65,7 +84,7 @@ function SetupView() {
         checked={m.setup.micOn}
         onToggle={() => m.setSetup({ micOn: !m.setup.micOn })}
         title="Microphone (you)"
-        caption="Your side of the meeting — transcribed as “me”."
+        caption="Your side of the meeting — transcribed as “me”. Headphones improve who-said-what."
       />
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -106,14 +125,16 @@ function SetupView() {
         title="Record the screen"
         caption={platform.wayland
           ? 'Your desktop picker will appear when the meeting starts (Wayland portal).'
-          : 'Captures the primary screen; the analyst also gets periodic snapshots.'}
+          : needsPicker
+            ? 'You pick a screen or window right before the meeting starts; the analyst also gets periodic snapshots.'
+            : 'Captures the primary screen; the analyst also gets periodic snapshots.'}
       />
 
       <div>
         <PixelButton
           variant="primary"
           size="md"
-          onClick={() => { void m.start(); }}
+          onClick={begin}
           disabled={m.status !== 'idle' || (!m.setup.micOn && !m.setup.systemDeviceId && !m.setup.screenOn)}
         >
           <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
@@ -122,11 +143,7 @@ function SetupView() {
         </PixelButton>
       </div>
 
-      {m.meetings.length > 0 && (
-        <div style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>
-          {m.meetings.length} past meeting{m.meetings.length === 1 ? '' : 's'} recorded in this project.
-        </div>
-      )}
+      <MeetingHistory />
     </div>
   );
 }
@@ -135,6 +152,15 @@ function SetupView() {
 
 function LiveView() {
   const m = useMeeting();
+  const feedRef = useRef<HTMLDivElement | null>(null);
+  // Keep the transcript pinned to the newest line unless the user scrolled up.
+  useEffect(() => {
+    const el = feedRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (nearBottom) el.scrollTop = el.scrollHeight;
+  }, [m.transcript.length]);
+
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -167,33 +193,58 @@ function LiveView() {
 
       {m.error && <Banner color="var(--cth-status-blocked)" text={m.error} onClose={m.clearError} />}
 
-      <div style={{
-        flex: 1, minHeight: 0, overflowY: 'auto',
-        background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
-        padding: 10, display: 'flex', flexDirection: 'column', gap: 6
-      }}>
-        {m.transcript.length === 0 ? (
-          <div style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>
-            Listening… the live transcript appears here a few seconds behind the conversation.
-          </div>
-        ) : (
-          m.transcript.map((s, i) => (
-            <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, lineHeight: '18px' }}>
-              <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-500)', flexShrink: 0, paddingTop: 1 }}>
-                {fmtClock(s.t0)}
-              </span>
-              <span style={{
-                flexShrink: 0, paddingTop: 1,
-                fontFamily: 'var(--cth-font-display)', fontSize: 8,
-                color: s.source === 'mic' ? 'var(--cth-teal, #14B8A6)' : 'var(--cth-ink-700)'
-              }}>
-                {s.source === 'mic' ? 'ME' : 'THEM'}
-              </span>
-              <span style={{ color: 'var(--cth-ink-900)' }}>{s.text}</span>
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: 10 }}>
+        {/* Transcript */}
+        <div
+          ref={feedRef}
+          style={{
+            flex: 3, minWidth: 0, minHeight: 0, overflowY: 'auto',
+            background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+            padding: 10, display: 'flex', flexDirection: 'column', gap: 6
+          }}
+        >
+          {m.transcript.length === 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>
+              Listening… the live transcript appears here a few seconds behind the conversation.
             </div>
-          ))
-        )}
+          ) : (
+            m.transcript.map((s, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, lineHeight: '18px' }}>
+                <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-500)', flexShrink: 0, paddingTop: 1 }}>
+                  {fmtClock(s.t0)}
+                </span>
+                <span style={{
+                  flexShrink: 0, paddingTop: 1,
+                  fontFamily: 'var(--cth-font-display)', fontSize: 8,
+                  color: s.source === 'mic' ? 'var(--cth-teal, #14B8A6)' : 'var(--cth-ink-700)'
+                }}>
+                  {s.source === 'mic' ? 'ME' : 'THEM'}
+                </span>
+                <span style={{ color: 'var(--cth-ink-900)' }}>{s.text}</span>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Analyst insights */}
+        <div style={{
+          flex: 2, minWidth: 0, minHeight: 0, overflowY: 'auto',
+          display: 'flex', flexDirection: 'column', gap: 8
+        }}>
+          <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-700)' }}>
+            ANALYST INSIGHTS
+          </div>
+          {m.insights.length === 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>
+              The meeting analyst posts recommendations, proposals and action items here as the
+              conversation develops.
+            </div>
+          ) : (
+            m.insights.map((ins, i) => <InsightCard key={i} insight={ins} meetingTitle={m.active?.title} />)
+          )}
+        </div>
       </div>
+
       {m.sttBacklog > 3 && (
         <div style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
           ⏳ transcription is lagging ({m.sttBacklog} segments queued) — consider the faster model in Settings.

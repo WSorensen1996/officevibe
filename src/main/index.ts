@@ -1122,6 +1122,15 @@ ipcMain.handle('meeting:stop', (_evt, id: unknown, durationSec: unknown) => {
 ipcMain.handle('meeting:list', () => meetings.list());
 ipcMain.handle('meeting:read', (_evt, id: unknown) =>
   (typeof id === 'string' ? meetings.read(id) : { ok: false, error: 'invalid args' }));
+/** Reveal the recording (or the meeting folder) in the OS file manager. Safe:
+ *  the manager's id regex confines the path to <project>/meetings/<id>. */
+ipcMain.handle('meeting:reveal', (_evt, id: unknown) => {
+  if (typeof id !== 'string') return { ok: false, error: 'invalid args' };
+  const read = meetings.read(id);
+  if (!read.ok) return read;
+  shell.showItemInFolder(read.recordingPath ?? meetings.meetingDir(id)!);
+  return { ok: true };
+});
 /** IPC payloads arrive as Buffer/Uint8Array/ArrayBuffer depending on sender shape;
  *  normalize to a Uint8Array view without copying. */
 function toBytes(x: unknown): Uint8Array | null {

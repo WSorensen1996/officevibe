@@ -882,9 +882,10 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   /** When set, the form edits this task instead of creating a new one. */
   initial?: ProjectTask;
   /** Prefill for a NEW task (create mode only — never sets `editing`). Used by
-   *  "new task from selection": `reference` carries the source text (sent to the
-   *  agent, NOT prefilled into the description) plus a back-reference dep. */
-  seed?: { description?: string; reference?: string; dependsOn?: string[] };
+   *  "new task from selection" and meeting-insight cards: `reference` carries the
+   *  source text (sent to the agent, NOT prefilled into the description) plus a
+   *  back-reference dep; `title` comes from an analyst's suggestedTask. */
+  seed?: { title?: string; description?: string; reference?: string; dependsOn?: string[] };
   /** The task's current schedule, if any — seeds the SCHEDULE controls. */
   initialMission?: ScheduledMission;
   onCancel: () => void;
@@ -906,7 +907,7 @@ export function AddTaskForm({ agents, existing, initial, seed, initialMission, o
   // task being edited). See store `TaskDraft` / `openTask`.
   const setTaskDraft = useStore((s) => s.setTaskDraft);
   const [draft0] = useState(() => (initial ? null : useStore.getState().taskDraft));
-  const [title, setTitle] = useState(initial?.title ?? draft0?.title ?? '');
+  const [title, setTitle] = useState(initial?.title ?? draft0?.title ?? seed?.title ?? '');
   const [description, setDescription] = useState(initial?.description ?? draft0?.description ?? seed?.description ?? '');
   // Reference: source context (e.g. the text a "new task from selection" was spun
   // from). Held SEPARATE from the description so the description field stays clean
