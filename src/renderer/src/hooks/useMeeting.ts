@@ -5,7 +5,14 @@ import {
   type AudioInputDevice
 } from '@/lib/meeting/capture';
 import type { MeetingMeta, MeetingInsight, TranscriptSegment } from '@/lib/meeting/types';
-import { useStore } from '@/store/store';
+import { useStore, type Agent } from '@/store/store';
+import { buildSpawnCommand } from '@/store/config';
+import { submitToPty } from '@/hooks/ptyInput';
+
+/** The analyst's fixed identity (mirrors ANALYST_AGENT_ID in main/meeting.ts).
+ *  Pam — the office's note-taker — sits in on every meeting. */
+const ANALYST_ID = 'analyst';
+const ANALYST_PTY = `pty-${ANALYST_ID}`;
 
 /**
  * The meeting feature's renderer state machine. The capture engine itself is a
@@ -46,6 +53,8 @@ interface MeetingStore {
   /** Pending STT segments not yet transcribed — drives the "lagging" badge. */
   sttBacklog: number;
   levels: { mic: number; system: number };
+  /** The analysis driver reported the analyst's PTY dead — offer a respawn. */
+  analystDown: boolean;
 
   /** Past meetings (newest first) for the history view. */
   meetings: MeetingMeta[];
@@ -54,6 +63,9 @@ interface MeetingStore {
   setSetup: (patch: Partial<MeetingSetup>) => void;
   start: () => Promise<void>;
   stop: (reason?: string) => Promise<void>;
+  /** (Re)spawn the analyst agent ("Pam") — used at meeting start and from the
+   *  analyst-down banner. Resolves once the PTY is live. */
+  ensureAnalyst: () => Promise<void>;
   loadMeetings: () => Promise<void>;
   clearError: () => void;
 }
@@ -70,6 +82,7 @@ export const useMeetingStore = create<MeetingStore>((set, get) => ({
   insights: [],
   sttBacklog: 0,
   levels: { mic: 0, system: 0 },
+  analystDown: false,
   meetings: [],
 
   refreshDevices: async () => {
@@ -93,10 +106,19 @@ export const useMeetingStore = create<MeetingStore>((set, get) => ({
   start: async () => {
     const { status, setup, devices } = get();
     if (status !== 'idle' || isCapturing()) return;
-    set({ status: 'starting', error: null, notice: null, transcript: [], insights: [], elapsedSec: 0 });
+    set({ status: 'starting', error: null, notice: null, transcript: [], insights: [], elapsedSec: 0, analystDown: false });
     try {
       const cfg = await window.cth.getConfig();
       const platform = window.cth.platform;
+
+      // The analyst sits in on every meeting: spawn Pam if she isn't live, and
+      // give a returning Pam a fresh context window (/clear) — a 2h meeting is
+      // the real context bound. Best-effort: a failed spawn degrades to
+      // record+transcribe-only and the analystDown banner offers a retry.
+      try { await get().ensureAnalyst(); }
+      catch (e) { set({ analystDown: true, notice: `meeting analyst unavailable: ${e instanceof Error ? e.message : e}` }); }
+      // Let the wake-nudge loop deliver analyst ticks even with auto-pilot off.
+      useStore.getState().startFloor();
       // System audio: Linux uses the picked monitor device; win/mac ride loopback
       // on the display stream (only available when the screen is captured).
       const monitorLabel = devices.find((d) => d.deviceId === setup.systemDeviceId)?.label;
@@ -162,6 +184,60 @@ export const useMeetingStore = create<MeetingStore>((set, get) => ({
     }
   },
 
+  ensureAnalyst: async () => {
+    const cfg = await window.cth.getConfig();
+    const cwd = cfg.activeProjectPath;
+    if (!cwd) throw new Error('no active project');
+    const live = await window.cth.listPtys().catch(() => []);
+    if (live.some((p) => p.id === ANALYST_PTY)) {
+      // Returning analyst → fresh context window for the new meeting. Only when
+      // idle: /clear typed into a mid-turn session would be eaten as text.
+      const a = useStore.getState().agents.find((x) => x.id === ANALYST_ID);
+      if (!a || a.status === 'idle' || a.status === 'waiting') {
+        await submitToPty(ANALYST_PTY, '/clear').catch(() => { /* best-effort */ });
+      }
+      set({ analystDown: false });
+      return;
+    }
+    const command = buildSpawnCommand(cfg, cfg.analystModel ?? cfg.defaultModel, cfg.defaultEffort);
+    const [exe, ...args] = command.trim().split(/\s+/);
+    const res = await window.cth.spawnPty({
+      id: ANALYST_PTY,
+      cwd,
+      command: exe,
+      args,
+      cols: 100,
+      rows: 30,
+      hive: { id: ANALYST_ID, name: 'Pam', cwd, isAnalyst: true, role: 'meeting analyst — listens to live meetings, surfaces insights + action items' }
+    });
+    if (!res.ok) throw new Error(res.error ?? 'analyst spawn failed');
+    const projectLabel = cfg.projects?.find((p) => p.path === cwd)?.name ?? 'project';
+    const pam: Agent = {
+      id: ANALYST_ID,
+      name: 'Pam',
+      character: 'pam',
+      accent: 'mint',
+      description: 'meeting analyst — listens to live meetings, surfaces insights + action items',
+      project: projectLabel,
+      cwd,
+      status: 'idle',
+      action: 'listening in',
+      progress: 0,
+      currentStation: 'desk',
+      ptyId: ANALYST_PTY,
+      command: command.trim(),
+      model: cfg.analystModel ?? cfg.defaultModel,
+      effort: cfg.defaultEffort,
+      isAnalyst: true,
+      recentTextTs: Date.now()
+    };
+    // addAgent auto-selects; keep the user's selection where it was.
+    const prevSel = useStore.getState().selectedId;
+    useStore.getState().addAgent(pam);
+    if (prevSel) useStore.getState().select(prevSel);
+    set({ analystDown: false });
+  },
+
   loadMeetings: async () => {
     try { set({ meetings: await window.cth.meeting.list() }); } catch { /* keep last good */ }
   },
@@ -184,26 +260,37 @@ function stopTicker(): void {
 }
 
 let refCount = 0;
-let unsubTranscript: (() => void) | null = null;
-let unsubInsight: (() => void) | null = null;
+let unsubs: Array<() => void> = [];
 
 function startLifecycle(): void {
   void useMeetingStore.getState().refreshDevices();
   void useMeetingStore.getState().loadMeetings();
-  unsubTranscript = window.cth.meeting.onTranscript(({ meetingId, segments }) => {
-    const s = useMeetingStore.getState();
-    if (s.active?.id !== meetingId) return;
-    useMeetingStore.setState({ transcript: [...s.transcript, ...segments].slice(-FEED_CAP) });
-  });
-  unsubInsight = window.cth.meeting.onInsight((insight) => {
-    const s = useMeetingStore.getState();
-    if (s.active?.id !== insight.meetingId) return;
-    useMeetingStore.setState({ insights: [...s.insights, insight].slice(-FEED_CAP) });
-  });
+  unsubs = [
+    window.cth.meeting.onTranscript(({ meetingId, segments }) => {
+      const s = useMeetingStore.getState();
+      if (s.active?.id !== meetingId) return;
+      useMeetingStore.setState({ transcript: [...s.transcript, ...segments].slice(-FEED_CAP) });
+    }),
+    window.cth.meeting.onInsight((insight) => {
+      const s = useMeetingStore.getState();
+      if (s.active?.id !== insight.meetingId) return;
+      useMeetingStore.setState({ insights: [...s.insights, insight].slice(-FEED_CAP) });
+    }),
+    window.cth.meeting.onAnalystDown(({ meetingId }) => {
+      const s = useMeetingStore.getState();
+      if (s.active?.id !== meetingId) return;
+      useMeetingStore.setState({ analystDown: true });
+    }),
+    window.cth.meeting.onAnalysisPaused(({ meetingId, reason }) => {
+      const s = useMeetingStore.getState();
+      if (s.active?.id !== meetingId) return;
+      useMeetingStore.setState({ notice: reason });
+    })
+  ];
 }
 function stopLifecycle(): void {
-  unsubTranscript?.(); unsubTranscript = null;
-  unsubInsight?.(); unsubInsight = null;
+  for (const u of unsubs) { try { u(); } catch { /* noop */ } }
+  unsubs = [];
 }
 
 /** Subscribe a component to meeting state. Wires the IPC feeds on the first
@@ -224,11 +311,4 @@ export function useMeeting() {
 /** Lightweight selector for the tab badge: is a meeting recording right now? */
 export function useMeetingRecording(): boolean {
   return useMeetingStore((s) => s.status === 'recording' || s.status === 'stopping');
-}
-
-/** The meeting tab badge also wants the floor started so analyst nudges flow —
- *  exported here so MeetingPanel can flip it on start without importing useStore
- *  everywhere. */
-export function markFloorStarted(): void {
-  try { useStore.getState().startFloor(); } catch { /* store unavailable in tests */ }
 }

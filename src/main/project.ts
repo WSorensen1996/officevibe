@@ -121,6 +121,9 @@ export interface AgentMeta {
   /** Michael's silent prep assistant. Send-only: excluded from broadcast
    *  fan-out so it never drains an inbox. */
   isAssistant?: boolean;
+  /** The meeting analyst: a normal worker (receives inbox mail — meeting ticks)
+   *  with a dedicated role block in the injected prompt. See MeetingAnalysisDriver. */
+  isAnalyst?: boolean;
 }
 
 export interface RegistryAgent extends AgentMeta {
@@ -221,6 +224,14 @@ export class ProjectManager {
   /** Record the browser MCP endpoint so subsequent spawns inject it. */
   setBrowserEndpoint(url: string): void {
     this.browserEndpoint = { url };
+  }
+
+  /** Sink for {type:"meeting-insight"} outbox files (set by the main process to
+   *  MeetingManager.ingestInsight). A side-channel like task-updates: handled in
+   *  routeOnce, never routed as mail. Injected so meeting logic stays in meeting.ts. */
+  private meetingInsightSink: ((by: string, raw: Record<string, unknown>) => void) | null = null;
+  setMeetingInsightSink(fn: ((by: string, raw: Record<string, unknown>) => void) | null): void {
+    this.meetingInsightSink = fn;
   }
 
   /** Authoritative "is this agent live?" probe, injected by the main process so the
@@ -665,10 +676,16 @@ export class ProjectManager {
     // brief PLUS a division-of-labor addendum that keeps Michael primary (sole board
     // scribe + the human channel) and prevents two orchestrators double-dispatching.
     const coOrchestratorLine = orchestratorLine + ' CO-ORCHESTRATOR DIVISION OF LABOR (this is you, Dwight): you are the SECONDARY orchestrator and you have Michael\'s full knowledge and privileges — you MAY modify/create files, delegate to workers via their inboxes, and use every tool (you are NOT read-only anymore). BUT Michael (god) is PRIMARY: he remains the sole scribe of board.md and the only channel to the human. So: act ONLY on the todos/batches Michael explicitly delegates to you; do NOT independently scan the TODO column or claim tasks Michael has not handed you (that is what prevents two orchestrators double-dispatching the same task); never edit a file another agent is currently editing; propose board.md changes to Michael instead of writing board.md yourself; report progress and completions back to Michael with a message to "god"; for anything needing the human, message "god" (Michael relays it).';
+    // The meeting analyst listens to live meetings and surfaces value, quietly.
+    // Ticks are inbox mail from the harness's analysis driver (sender 'meeting'),
+    // NOT from another agent — so the analyst never "replies" to them as mail.
+    const analystLine = 'You are the team\'s MEETING ANALYST. The harness sends you "Meeting tick" inbox messages while the human is in a live meeting: each carries the newest transcript lines (timestamps + ME/THEM speaker hints, transcribed locally — expect some ASR errors) and often absolute paths to recent screen frames. Your job per tick: (1) skim the new lines (Read 1-2 of the frame images ONLY when the words suggest the screen matters — a demo, a document, an error on screen); (2) if — and only if — you have something genuinely useful for the human RIGHT NOW (a recommendation, a risk, a proposal, a concrete action item, an unanswered question), write ONE JSON file into your outbox per insight, shaped {"type":"meeting-insight","meetingId":"<the meeting id from the tick>","kind":"recommendation|proposal|action-item|note|question","text":"one tight, self-contained insight","quote":"optional short transcript quote it rests on","suggestedTask":{"title":"imperative task title","description":"what to do + acceptance criteria"}} — include suggestedTask ONLY when the insight is genuinely actionable as a team task. HARD RULES: at most 1-2 insights per tick and most ticks deserve ZERO (silence is fine; never restate or summarize the conversation back); never message other agents or god during a live meeting; do not write files except your outbox unless a tick explicitly asks. At the WRAP-UP tick (it says the meeting ENDED and gives you a summary.md path): read the full transcript file it points at, Write a concise summary there (## TL;DR, ## Decisions, ## Action items, ## Open questions), then post ONE final meeting-insight (kind "note") saying the summary is ready. Between meetings, stay idle.';
     const godLine = meta.isGod
       ? orchestratorLine
       : meta.isAssistant
       ? coOrchestratorLine
+      : meta.isAnalyst
+      ? analystLine
       : 'For anything ambiguous, cross-cutting, or needing sign-off, address a message to "god".';
     // Browser line is GATED on the browser MCP endpoint actually being up: claiming a
     // browser the agent can't reach is the stale-port bug (the prompt promises
@@ -908,6 +925,12 @@ export class ProjectManager {
             this.stageSkillProposal(id, partial); // a learned skill → knowledge library
           } else if (partial.type === 'skill-patch') {
             this.stageSkillPatch(id, partial); // an in-flight correction → knowledge library
+          } else if (partial.type === 'meeting-insight') {
+            // The analyst's live findings → the meeting record + insights feed.
+            // Validation/persistence live in meeting.ts; a missing sink (no meeting
+            // feature wired, e.g. tests) just drops it like a task-update miss.
+            try { this.meetingInsightSink?.(id, partial as Record<string, unknown>); }
+            catch (e) { this.appendLog({ kind: 'meeting-insight-miss', by: id, error: String(e) }); }
           } else {
             const msg = this.normalize(partial, id);
             msg.from = id; // sender is authoritative — the owning directory

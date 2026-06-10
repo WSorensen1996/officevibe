@@ -70,6 +70,10 @@ export interface MeetingInsight {
 const MEETING_ID_RE = /^m-[A-Za-z0-9-]{4,120}$/;
 const INSIGHT_KINDS = ['recommendation', 'proposal', 'action-item', 'note', 'question'] as const;
 
+/** The analyst's fixed hive id (PTY = `pty-analyst`); the renderer spawns it
+ *  lazily on first meeting start. */
+export const ANALYST_AGENT_ID = 'analyst';
+
 /** Filesystem- and sort-safe timestamp (matches project.ts's stamp()). */
 function stamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-');
@@ -361,6 +365,222 @@ export class MeetingManager {
       return readFileSync(p, 'utf8').trim().split('\n').filter(Boolean)
         .map((l) => { try { return JSON.parse(l) as T; } catch { return null; } })
         .filter((x): x is T => x !== null);
+    } catch {
+      return [];
+    }
+  }
+}
+
+// ─── MeetingAnalysisDriver ────────────────────────────────────────────────────
+
+/** What the driver needs from the outside world — injected (like ProjectManager's
+ *  emit) so this stays electron-free and unit-testable. */
+export interface AnalysisDriverDeps {
+  manager: MeetingManager;
+  /** hive.send — drops the tick into the analyst's inbox (the wake-nudge loop and
+   *  the Stop-hook drain take it from there). */
+  send: (partial: { to: string; act: 'inform'; subject: string; body: string }, from: string) => void;
+  getConfig: () => { meetingAnalysisIntervalSec?: number; curatorUsageCeilingPercent?: number };
+  /** PTY liveness for `pty-analyst`. Checked BEFORE every send: routeMessage
+   *  reroutes mail for a dead agent to god, so ticking a dead analyst would spam
+   *  Michael's inbox once a minute. */
+  isAnalystLive: () => boolean;
+  getUsage: () => { fiveHour: { usedPercent: number } | null } | null;
+  emit?: (channel: string, payload: unknown) => void;
+}
+
+/** Don't bother the analyst until at least this much new transcript accumulated
+ *  (forced through after two quiet ticks so slow meetings still get analyzed). */
+const MIN_TICK_CHARS = 200;
+/** Per-tick transcript budget (chars) — the analyst gets the NEWEST lines. */
+const TICK_BODY_CAP = 4000;
+/** Max screen frames referenced per tick. */
+const FRAMES_PER_TICK = 2;
+/** Pause analysis when the 5h Claude window is hotter than this (analysis is a
+ *  nice-to-have; the user's interactive agents are not). */
+const USAGE_CEILING_PERCENT = 85;
+
+function clock(totalSec: number): string {
+  const s = Math.max(0, Math.floor(totalSec));
+  const m = Math.floor(s / 60);
+  return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/**
+ * Drives the live analysis loop: accumulates fresh transcript segments from the
+ * MeetingManager, and on a cadence packages them (plus the newest screen frames)
+ * into an `inform` inbox message for the analyst agent. `inform` is deliberate —
+ * it neither expects a reply (normalize() would default `requires_reply` on a
+ * request) nor triggers claimTaskOnDelegation. On meeting stop it sends the
+ * wrap-up instruction that produces summary.md.
+ */
+export class MeetingAnalysisDriver {
+  constructor(private deps: AnalysisDriverDeps) {}
+
+  private meetingId: string | null = null;
+  private meetingTitle = '';
+  private timer: NodeJS.Timeout | null = null;
+  private pending: TranscriptSegment[] = [];
+  private pendingChars = 0;
+  private quietTicks = 0;
+  private firstTick = true;
+  /** Highest frame second already sent — frames are named frame-<sec>.jpg. */
+  private frameHighwater = -1;
+  private analystDownNotified = false;
+  private usagePauseNotified = false;
+  /** Total transcript chars seen this meeting — gates the wrap-up (no speech, no summary). */
+  private totalChars = 0;
+
+  active(): string | null {
+    return this.meetingId;
+  }
+
+  attach(meetingId: string, title: string): void {
+    this.detach();
+    this.meetingId = meetingId;
+    this.meetingTitle = title;
+    this.firstTick = true;
+    this.deps.manager.setTranscriptListener((id, segments) => {
+      if (id !== this.meetingId) return;
+      this.pending.push(...segments);
+      for (const s of segments) {
+        this.pendingChars += s.text.length;
+        this.totalChars += s.text.length;
+      }
+    });
+    const sec = Math.max(15, Math.min(600, this.deps.getConfig().meetingAnalysisIntervalSec ?? 60));
+    this.timer = setInterval(() => { try { this.tick(); } catch (e) { console.error('[meeting] tick failed:', e); } }, sec * 1000);
+    this.timer.unref?.();
+  }
+
+  /** Meeting ended normally: final flush + the wrap-up instruction. */
+  stop(meetingId: string): void {
+    if (this.meetingId !== meetingId) return;
+    const dir = this.deps.manager.meetingDir(meetingId);
+    const hadSpeech = this.totalChars > 0;
+    const tail = this.pending;
+    this.detach();
+    if (!dir || !hadSpeech || !this.deps.isAnalystLive()) return; // nothing to summarize / nobody to ask
+    const tailLines = tail.length
+      ? `\n\nTranscript since the last tick (the full record is in the file):\n${this.formatLines(tail)}`
+      : '';
+    this.deps.send({
+      to: ANALYST_AGENT_ID,
+      act: 'inform',
+      subject: `Meeting ended — write the summary (${meetingId})`,
+      body: [
+        `The meeting "${this.titleOr(meetingId)}" has ENDED. Wrap-up time:`,
+        `1. Read the full transcript: ${join(dir, 'transcript.jsonl')} (one JSON row per segment; t0/t1 = seconds, source mic = the human "ME", system = the other participants "THEM").`,
+        `2. If visuals matter, frames are in ${join(dir, 'frames')}/.`,
+        `3. Write a concise summary to ${join(dir, 'summary.md')} with sections: ## TL;DR, ## Decisions, ## Action items (owner → what), ## Open questions.`,
+        `4. Then post ONE final outbox file: {"type":"meeting-insight","meetingId":"${meetingId}","kind":"note","text":"Summary ready: <one-line takeaway>"}.${tailLines}`
+      ].join('\n')
+    }, 'meeting');
+  }
+
+  /** Silent cleanup (project switch / app teardown) — no wrap-up message. */
+  detach(): void {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    this.deps.manager.setTranscriptListener(null);
+    this.meetingId = null;
+    this.meetingTitle = '';
+    this.pending = [];
+    this.pendingChars = 0;
+    this.quietTicks = 0;
+    this.frameHighwater = -1;
+    this.totalChars = 0;
+    this.analystDownNotified = false;
+    this.usagePauseNotified = false;
+  }
+
+  /** One cadence beat — exposed for tests. */
+  tick(): void {
+    const meetingId = this.meetingId;
+    if (!meetingId) return;
+
+    if (!this.deps.isAnalystLive()) {
+      // Hold the delta (analysis resumes where it left off) and tell the UI once.
+      if (!this.analystDownNotified) {
+        this.analystDownNotified = true;
+        this.deps.emit?.('meeting:analystDown', { meetingId });
+      }
+      return;
+    }
+    this.analystDownNotified = false;
+
+    const five = this.deps.getUsage()?.fiveHour?.usedPercent ?? 0;
+    if (five > USAGE_CEILING_PERCENT) {
+      if (!this.usagePauseNotified) {
+        this.usagePauseNotified = true;
+        this.deps.emit?.('meeting:analysisPaused', { meetingId, reason: `Claude usage at ${Math.round(five)}% — live analysis paused` });
+      }
+      return;
+    }
+    this.usagePauseNotified = false;
+
+    if (this.pendingChars === 0) return;
+    if (this.pendingChars < MIN_TICK_CHARS && this.quietTicks < 2) {
+      this.quietTicks++;
+      return;
+    }
+
+    const segments = this.pending;
+    this.pending = [];
+    this.pendingChars = 0;
+    this.quietTicks = 0;
+
+    const intro = this.firstTick
+      ? `A live meeting is running: "${this.titleOr(meetingId)}" (meeting id ${meetingId}). Ticks like this keep arriving until it ends — follow your MEETING ANALYST protocol.\n\n`
+      : '';
+    this.firstTick = false;
+
+    const frames = this.newFrames(meetingId);
+    const framesBlock = frames.length
+      ? `\n\nNewest screen frames (Read only if the words suggest the screen matters):\n${frames.map((f) => `- ${f}`).join('\n')}`
+      : '';
+
+    this.deps.send({
+      to: ANALYST_AGENT_ID,
+      act: 'inform',
+      subject: `Meeting tick — ${this.titleOr(meetingId)}`,
+      body: `${intro}New transcript:\n${this.formatLines(segments)}${framesBlock}\n\n(Insights: 0-2 outbox meeting-insight files for meetingId "${meetingId}"; silence is fine.)`
+    }, 'meeting');
+  }
+
+  // — helpers —
+
+  private titleOr(meetingId: string): string {
+    return this.meetingTitle || meetingId;
+  }
+
+  /** `[mm:ss ME|THEM] text` lines, newest kept within the per-tick budget. */
+  private formatLines(segments: TranscriptSegment[]): string {
+    const lines = segments.map((s) => `[${clock(s.t0)} ${s.source === 'mic' ? 'ME' : 'THEM'}] ${s.text}`);
+    let body = lines.join('\n');
+    while (body.length > TICK_BODY_CAP && lines.length > 1) {
+      lines.shift(); // drop oldest — the analyst needs the freshest context
+      body = `(…older lines trimmed…)\n${lines.join('\n')}`;
+    }
+    return body;
+  }
+
+  /** Absolute paths of up-to-N frames newer than the highwater, oldest→newest. */
+  private newFrames(meetingId: string): string[] {
+    const dir = this.deps.manager.meetingDir(meetingId);
+    if (!dir) return [];
+    const framesDir = join(dir, 'frames');
+    if (!existsSync(framesDir)) return [];
+    try {
+      const fresh = readdirSync(framesDir)
+        .map((f) => {
+          const m = /^frame-(\d{6})\.jpg$/.exec(f);
+          return m ? { sec: Number(m[1]), path: join(framesDir, f) } : null;
+        })
+        .filter((x): x is { sec: number; path: string } => x !== null && x.sec > this.frameHighwater)
+        .sort((a, b) => a.sec - b.sec);
+      if (fresh.length === 0) return [];
+      this.frameHighwater = fresh[fresh.length - 1].sec;
+      return fresh.slice(-FRAMES_PER_TICK).map((x) => x.path);
     } catch {
       return [];
     }

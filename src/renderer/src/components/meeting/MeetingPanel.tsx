@@ -192,6 +192,21 @@ function LiveView() {
       </div>
 
       {m.error && <Banner color="var(--cth-status-blocked)" text={m.error} onClose={m.clearError} />}
+      {m.notice && <Banner color="var(--cth-sky)" text={m.notice} onClose={m.clearError} />}
+      {m.analystDown && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
+          background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-status-blocked)',
+          fontSize: 12, color: 'var(--cth-ink-900)'
+        }}>
+          <span style={{ flex: 1 }}>
+            The meeting analyst (Pam) is offline — recording and transcription continue, but no live insights.
+          </span>
+          <PixelButton variant="secondary" size="sm" onClick={() => { void m.ensureAnalyst().catch(() => { /* banner stays */ }); }}>
+            respawn analyst
+          </PixelButton>
+        </div>
+      )}
 
       <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: 10 }}>
         {/* Transcript */}

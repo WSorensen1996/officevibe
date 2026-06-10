@@ -252,7 +252,9 @@ export function useProject(config: HarnessConfig | null): void {
               args,
               cols: 100,
               rows: 30,
-              hive: { id: a.id, name: a.name, cwd: a.cwd, role: a.description }
+              // isAnalyst must survive the respawn or the analyst loses its
+              // injected role prompt (and meeting ticks read as noise to it).
+              hive: { id: a.id, name: a.name, cwd: a.cwd, role: a.description, isAnalyst: a.isAnalyst }
             });
             if (!cancelled && res.ok) {
               useStore.getState().updateAgent(a.id, { command: command.trim(), status: 'idle', action: 'reconnecting…' });

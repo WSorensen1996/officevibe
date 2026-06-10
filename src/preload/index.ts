@@ -8,6 +8,8 @@ export interface AgentMeta {
   cwd: string;
   isGod?: boolean;
   isAssistant?: boolean;
+  /** The meeting analyst — a normal worker with a dedicated role prompt. */
+  isAnalyst?: boolean;
 }
 
 export interface ProjectMessage {
@@ -669,11 +671,23 @@ const api = {
       ipcRenderer.on('meeting:state', listener);
       return () => ipcRenderer.removeListener('meeting:state', listener);
     },
-    /** The analyst posted an insight (Phase 4) — drives the live insights feed. */
+    /** The analyst posted an insight — drives the live insights feed. */
     onInsight: (cb: (insight: MeetingInsight) => void): (() => void) => {
       const listener = (_e: IpcRendererEvent, insight: MeetingInsight) => cb(insight);
       ipcRenderer.on('meeting:insight', listener);
       return () => ipcRenderer.removeListener('meeting:insight', listener);
+    },
+    /** The analysis driver found the analyst's PTY dead — offer a respawn. */
+    onAnalystDown: (cb: (e: { meetingId: string }) => void): (() => void) => {
+      const listener = (_e: IpcRendererEvent, payload: { meetingId: string }) => cb(payload);
+      ipcRenderer.on('meeting:analystDown', listener);
+      return () => ipcRenderer.removeListener('meeting:analystDown', listener);
+    },
+    /** Live analysis paused (e.g. Claude usage ceiling) — informational. */
+    onAnalysisPaused: (cb: (e: { meetingId: string; reason: string }) => void): (() => void) => {
+      const listener = (_e: IpcRendererEvent, payload: { meetingId: string; reason: string }) => cb(payload);
+      ipcRenderer.on('meeting:analysisPaused', listener);
+      return () => ipcRenderer.removeListener('meeting:analysisPaused', listener);
     }
   },
 

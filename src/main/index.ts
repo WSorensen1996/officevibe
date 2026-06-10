@@ -23,7 +23,7 @@ import { SlackWebhookServer } from './slack';
 import { startBrowserMcp, type BrowserMcpHandle } from './browserMcp';
 import { decryptDef, encryptDef, encryptionAvailable, isValidName, testConnection, type McpServerDef } from './mcp';
 import { decryptValue } from './secrets';
-import { MeetingManager, type MeetingSources, type TranscriptSegment } from './meeting';
+import { MeetingManager, MeetingAnalysisDriver, ANALYST_AGENT_ID, type MeetingSources, type TranscriptSegment } from './meeting';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 
@@ -167,12 +167,25 @@ const hookServer = new HookServer(
   knowledge,
   (agentId) => curator.onAgentIdle(agentId)
 );
-// Meeting recordings + live transcripts (and, later, the analysis driver) live
-// under <activeProject>/meetings; same lazy-root + emit shape as the hive.
+// Meeting recordings + live transcripts live under <activeProject>/meetings;
+// same lazy-root + emit shape as the hive.
 const meetings = new MeetingManager(
   () => readConfig().activeProjectPath,
   (channel, payload) => { try { liveWebContents()?.send(channel, payload); } catch { /* window tore down */ } }
 );
+// The live-analysis loop: transcript deltas + fresh frames → the analyst's inbox
+// on a cadence; wrap-up instruction (summary.md) at meeting end. The liveness
+// probe gates every send so a dead analyst never reroute-spams god's inbox.
+const analysisDriver = new MeetingAnalysisDriver({
+  manager: meetings,
+  send: (partial, from) => { hive.send(partial, from); },
+  getConfig: () => readConfig(),
+  isAnalystLive: () => ptyManager.has(`pty-${ANALYST_AGENT_ID}`),
+  getUsage: () => hive.usageLimits(),
+  emit: (channel, payload) => { try { liveWebContents()?.send(channel, payload); } catch { /* window tore down */ } }
+});
+// Analyst outbox {type:"meeting-insight"} files land in the meeting record.
+hive.setMeetingInsightSink((by, raw) => meetings.ingestInsight(by, raw));
 let mainWindow: BrowserWindow | null = null;
 
 // ─── Embedded browser pane (per-agent native WebContentsViews) ───────────────
@@ -1090,12 +1103,14 @@ ipcMain.handle('meeting:setDisplaySource', (_evt, id: unknown) => {
 // ─── IPC: meetings (recording + transcript persistence) ──────────────────────
 ipcMain.handle('meeting:start', (_evt, opts: unknown) => {
   const o = (opts ?? {}) as { title?: unknown; sources?: unknown; language?: unknown; model?: unknown };
-  return meetings.start({
+  const res = meetings.start({
     title: typeof o.title === 'string' ? o.title : undefined,
     sources: (o.sources ?? {}) as MeetingSources,
     language: typeof o.language === 'string' ? o.language : 'auto',
     model: typeof o.model === 'string' ? o.model : 'whisper-base'
   });
+  if (res.ok) analysisDriver.attach(res.meta.id, res.meta.title);
+  return res;
 });
 /** Hot path (~every 2s): one MediaRecorder chunk. Electron structured-clones the
  *  renderer's ArrayBuffer into a Node Buffer/Uint8Array here. */
@@ -1117,6 +1132,9 @@ ipcMain.handle('meeting:appendTranscript', (_evt, id: unknown, segments: unknown
 });
 ipcMain.handle('meeting:stop', (_evt, id: unknown, durationSec: unknown) => {
   if (typeof id !== 'string') return { ok: false, error: 'invalid args' };
+  // Wrap-up FIRST (the renderer already drained the transcription tail before
+  // calling stop, so the analyst's summary instruction sees the full record).
+  try { analysisDriver.stop(id); } catch (e) { console.error('[meeting] wrap-up failed:', e); }
   return meetings.stop(id, typeof durationSec === 'number' ? durationSec : undefined);
 });
 ipcMain.handle('meeting:list', () => meetings.list());
@@ -1263,6 +1281,7 @@ ipcMain.handle('project:mineNow', () => { memory.mineNow(); return { ok: true };
  *  the project-switch relaunch. */
 function teardownServices(tag: string): void {
   try { clearMissionTimers(); } catch (e) { console.error(`[${tag}] clearMissionTimers:`, e); }
+  try { analysisDriver.detach(); } catch (e) { console.error(`[${tag}] analysisDriver.detach:`, e); }
   try { hive.stopRouter(); } catch (e) { console.error(`[${tag}] stopRouter:`, e); }
   try { hookServer.stop(); } catch (e) { console.error(`[${tag}] hookServer.stop:`, e); }
   try { stopSlackServer(); } catch (e) { console.error(`[${tag}] slack.stop:`, e); }

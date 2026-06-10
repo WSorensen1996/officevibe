@@ -81,6 +81,10 @@ export interface Agent {
   /** Michael's co-orchestrator ("Dwight"). Acts on the todos/batches Michael
    *  delegates to him and can delegate to workers; still excluded from broadcasts. */
   isAssistant?: boolean;
+  /** The meeting analyst ("Pam") — receives live meeting ticks in its inbox and
+   *  posts meeting-insights. Must survive respawns (useProject #1d passes it
+   *  through) or the role prompt is lost. */
+  isAnalyst?: boolean;
   /** When git isolation is enabled, the dedicated worktree path the agent runs
    *  in (its own `agent/<id>` branch); undefined for shared-cwd agents. */
   worktreePath?: string;

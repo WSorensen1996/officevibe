@@ -1,8 +1,11 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MeetingManager, type MeetingMeta, type TranscriptSegment } from '../src/main/meeting';
+import {
+  MeetingManager, MeetingAnalysisDriver, ANALYST_AGENT_ID,
+  type MeetingMeta, type TranscriptSegment
+} from '../src/main/meeting';
 
 const base = realpathSync(mkdtempSync(join(tmpdir(), 'officevibe-meeting-')));
 afterAll(() => { try { rmSync(base, { recursive: true, force: true }); } catch { /* noop */ } });
@@ -124,6 +127,11 @@ describe('MeetingManager hardening', () => {
     expect(m.list()).toEqual([]);
   });
 
+  it('drops a meeting-insight whose sink raises (unknown meeting) without throwing', () => {
+    const m = manager();
+    expect(m.ingestInsight('analyst', { meetingId: 'm-not-real-0000', kind: 'note', text: 'x' }).ok).toBe(false);
+  });
+
   it('validates insights: unknown meeting, empty text, bad kind, traversal id', () => {
     const m = manager();
     const meta = startOne(m);
@@ -147,5 +155,146 @@ describe('MeetingManager hardening', () => {
     const raw = readFileSync(join(dir, 'insights.jsonl'), 'utf8');
     expect(raw.trim().split('\n')).toHaveLength(2);
     m.stop(meta.id, 2);
+  });
+});
+
+describe('MeetingAnalysisDriver', () => {
+  interface Sent { to: string; act: string; subject: string; body: string }
+
+  function harness(opts: { live?: boolean; fiveHour?: number } = {}) {
+    const m = manager();
+    const meta = startOne(m);
+    const sent: Sent[] = [];
+    let live = opts.live ?? true;
+    let fiveHour = opts.fiveHour ?? 10;
+    const driver = new MeetingAnalysisDriver({
+      manager: m,
+      send: (partial) => sent.push(partial as Sent),
+      getConfig: () => ({ meetingAnalysisIntervalSec: 60 }),
+      isAnalystLive: () => live,
+      getUsage: () => ({ fiveHour: { usedPercent: fiveHour } }),
+      emit: (channel, payload) => emitted.push({ channel, payload })
+    });
+    driver.attach(meta.id, meta.title);
+    return {
+      m, meta, driver, sent,
+      setLive: (v: boolean) => { live = v; },
+      setUsage: (v: number) => { fiveHour = v; },
+      speak: (text: string, t0 = 1) =>
+        m.appendTranscript(meta.id, [{ t0, t1: t0 + 2, source: 'mic', text }])
+    };
+  }
+
+  it('sends a tick once enough new transcript accumulated, with the meeting id + lines', () => {
+    const h = harness();
+    h.speak('x'.repeat(250));
+    h.driver.tick();
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].to).toBe(ANALYST_AGENT_ID);
+    expect(h.sent[0].act).toBe('inform');
+    expect(h.sent[0].body).toContain(h.meta.id);
+    expect(h.sent[0].body).toContain('ME]');
+    h.driver.detach();
+  });
+
+  it('skips short deltas but force-sends after two quiet ticks', () => {
+    const h = harness();
+    h.speak('short remark');
+    h.driver.tick(); // quiet 1
+    h.driver.tick(); // quiet 2
+    expect(h.sent).toHaveLength(0);
+    h.driver.tick(); // forced
+    expect(h.sent).toHaveLength(1);
+    h.driver.detach();
+  });
+
+  it('never ticks an empty delta', () => {
+    const h = harness();
+    h.driver.tick();
+    h.driver.tick();
+    h.driver.tick();
+    expect(h.sent).toHaveLength(0);
+    h.driver.detach();
+  });
+
+  it('holds ticks while the analyst is dead (no god-reroute spam) and resumes', () => {
+    const h = harness({ live: false });
+    h.speak('y'.repeat(300));
+    h.driver.tick();
+    h.driver.tick();
+    expect(h.sent).toHaveLength(0);
+    expect(emitted.filter((e) => e.channel === 'meeting:analystDown')).toHaveLength(1); // notified once
+    h.setLive(true);
+    h.driver.tick();
+    expect(h.sent).toHaveLength(1); // the held delta went out, nothing lost
+    h.driver.detach();
+  });
+
+  it('pauses on the usage ceiling', () => {
+    const h = harness({ fiveHour: 92 });
+    h.speak('z'.repeat(300));
+    h.driver.tick();
+    expect(h.sent).toHaveLength(0);
+    expect(emitted.some((e) => e.channel === 'meeting:analysisPaused')).toBe(true);
+    h.setUsage(20);
+    h.driver.tick();
+    expect(h.sent).toHaveLength(1);
+    h.driver.detach();
+  });
+
+  it('references only NEW frames, at most two, advancing the highwater', () => {
+    const h = harness();
+    const framesDir = join(h.m.meetingDir(h.meta.id)!, 'frames');
+    mkdirSync(framesDir, { recursive: true });
+    for (const sec of [5, 10, 15]) {
+      writeFileSync(join(framesDir, `frame-${String(sec).padStart(6, '0')}.jpg`), 'x');
+    }
+    h.speak('a'.repeat(300));
+    h.driver.tick();
+    expect(h.sent[0].body).toContain('frame-000010.jpg');
+    expect(h.sent[0].body).toContain('frame-000015.jpg');
+    expect(h.sent[0].body).not.toContain('frame-000005.jpg'); // capped at 2, newest win
+    writeFileSync(join(framesDir, 'frame-000020.jpg'), 'x');
+    h.speak('b'.repeat(300));
+    h.driver.tick();
+    expect(h.sent[1].body).toContain('frame-000020.jpg');
+    expect(h.sent[1].body).not.toContain('frame-000015.jpg'); // already sent
+    h.driver.detach();
+  });
+
+  it('caps a huge delta to the newest lines', () => {
+    const h = harness();
+    for (let i = 0; i < 30; i++) h.speak(`line ${i} ${'w'.repeat(300)}`, i * 10);
+    h.driver.tick();
+    expect(h.sent[0].body.length).toBeLessThan(6000);
+    expect(h.sent[0].body).toContain('line 29');
+    expect(h.sent[0].body).not.toContain('line 0 ');
+    h.driver.detach();
+  });
+
+  it('stop() sends the wrap-up with the summary path; detach() never does', () => {
+    const h = harness();
+    h.speak('decisions were made');
+    h.driver.stop(h.meta.id);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].subject).toContain('summary');
+    expect(h.sent[0].body).toContain('summary.md');
+    expect(h.sent[0].body).toContain('transcript.jsonl');
+
+    const h2 = harness();
+    h2.speak('more words here');
+    h2.driver.detach();
+    expect(h2.sent).toHaveLength(0);
+  });
+
+  it('skips the wrap-up when nobody spoke or the analyst is dead', () => {
+    const silent = harness();
+    silent.driver.stop(silent.meta.id);
+    expect(silent.sent).toHaveLength(0);
+
+    const dead = harness({ live: false });
+    dead.speak('words');
+    dead.driver.stop(dead.meta.id);
+    expect(dead.sent).toHaveLength(0);
   });
 });
